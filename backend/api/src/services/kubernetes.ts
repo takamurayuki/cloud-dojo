@@ -241,7 +241,8 @@ export class KubernetesService extends EventEmitter {
               this.emit('update', session);
               continue;
             }
-            const judged = judgeReadiness(resource.kind, obj);
+            // 直し回14：構造（kind・metadata.name・status・数値項目）を検証してから判定する。欠けた応答は失敗（error）
+            const judged = judgeReadiness(resource.kind, obj, resource.name);
             resource.detail = judged.detail;
             if (judged.state === 'ready') {
               resource.status = 'ready';

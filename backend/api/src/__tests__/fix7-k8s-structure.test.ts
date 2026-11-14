@@ -14,12 +14,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const cp = vi.hoisted(() => {
   const calls = { execFile: [] as { file: string; args: string[] }[] };
   /** 直し回13：apply 後の `kubectl get <Kind> <name> -o json` には、どの判定対象種別でも準備完了になる状態を返す */
-  const readyObject = (kind: string) =>
+  // 直し回14：応答の構造を検証するので、実際の kubectl と同じく取得した名前・generation・必ず返される数を含める
+  const readyObject = (kind: string, name: string) =>
     JSON.stringify({
       kind,
-      metadata: { name: 'x' },
-      spec: { replicas: 1, clusterIP: '10.96.0.1' },
+      metadata: { name, generation: 1 },
+      spec: { replicas: 1, type: 'ClusterIP', clusterIP: '10.96.0.1' },
       status: {
+        observedGeneration: 1,
+        replicas: 1,
+        currentNumberScheduled: 1,
+        numberReady: 1,
+        numberMisscheduled: 0,
         updatedReplicas: 1,
         availableReplicas: 1,
         readyReplicas: 1,
@@ -35,7 +41,7 @@ const cp = vi.hoisted(() => {
     });
   const execFile = (file: string, args: string[], _opts: unknown, cb: (e: unknown, o: string, s: string) => void) => {
     calls.execFile.push({ file, args });
-    cb(null, args[0] === 'get' ? readyObject(args[1]) : 'ok\n', '');
+    cb(null, args[0] === 'get' ? readyObject(args[1], args[2]) : 'ok\n', '');
   };
   Object.defineProperty(execFile, Symbol.for('nodejs.util.promisify.custom'), {
     value: (file: string, args: string[], opts: unknown) =>

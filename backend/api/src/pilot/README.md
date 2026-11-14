@@ -130,8 +130,15 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     apply の後は各リソースを `kubectl get <kind> <name> -o json` で取得し、種別ごとの規則（`services/k8s-readiness.ts`）で準備完了を判定する。
     取得の失敗（通信・認証・NotFound 等）・JSON として読めない応答・失敗が確定した状態（Pod の Failed、Job の Failed、
     Deployment の ProgressDeadlineExceeded 等）・期限（2秒間隔で15回）までに準備完了にならないものは、そのリソースを `error` にし、
-    セッションも `error` にしてジョブを失敗させる（失敗・準備完了・判定不能の内訳を message に出す）。判定するのは
-    Deployment・StatefulSet・ReplicaSet（更新・利用可能／準備完了のレプリカ数）、DaemonSet（配置・利用可能数）、Pod（Running かつ Ready、または Succeeded）、
+    セッションも `error` にしてジョブを失敗させる（失敗・準備完了・判定不能の内訳を message に出す）。
+    判定の前に応答の構造を検証する：kind が適用した種別と一致し、metadata.name が適用した名前と一致し、（判定対象の種別では）status が
+    オブジェクトであること、判定に使う数値項目が 0 以上の整数であること。欠落・不正な型は既定値で補わず「確認できない応答」として
+    取り直さずに `error` にする（`ready`・`unverified` にしない）。API サーバーが必ず返す項目（metadata.generation、spec.replicas、
+    StatefulSet・ReplicaSet の status.replicas、DaemonSet の desiredNumberScheduled・currentNumberScheduled・numberReady・numberMisscheduled、
+    Service の spec.type）の欠落も同じ。Kubernetes が 0 のとき省略するレプリカ数（availableReplicas 等）の欠落は 0 と読み替えず、
+    「未報告」として準備完了の根拠にしない（待っても揃わなければ期限切れで `error`）。コントローラ系は observedGeneration ≧ generation に加えて、
+    全体・更新済み・利用可能の数がすべて希望数と一致し（旧レプリカが残っていない）、利用不可が 0 または未設定のときだけ準備完了とする。判定するのは
+    Deployment・StatefulSet（全体・更新済み・準備完了・利用可能のレプリカ数）、ReplicaSet（全体・準備完了・利用可能の数）、DaemonSet（配置・更新済み・利用可能・利用不可の数）、Pod（Running かつ Ready、または Succeeded）、
     Job（Complete）、Service（clusterIP の割り当て。LoadBalancer は外部アドレスの割り当て。Endpoints は見ない）、PersistentVolumeClaim（Bound）、
     Namespace（Active）。それ以外の種別（ConfigMap・Secret・CRD 等）は存在だけを確かめて `unverified`（判定不能）とし、`ready` とはみなさない。
     内訳はセッションの `verification`（ready・unverified・failed）に入る。mock モードの模擬適用は従来どおり

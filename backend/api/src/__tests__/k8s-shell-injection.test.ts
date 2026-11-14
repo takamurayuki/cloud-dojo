@@ -46,7 +46,7 @@ const cp = vi.hoisted(() => {
     if (verb === 'get' && what === 'namespaces') return 'default kube-system demo';
     // 直し回13：apply 後の確認（`get <Kind> <name> -n <ns> -o json`）には準備完了の状態を返す
     if (verb === 'get' && what === 'Deployment')
-      return JSON.stringify({ kind: 'Deployment', metadata: { name: args[2] }, spec: { replicas: 1 }, status: { updatedReplicas: 1, availableReplicas: 1 } });
+      return JSON.stringify({ kind: 'Deployment', metadata: { name: args[2], generation: 1 }, spec: { replicas: 1 }, status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 } });
     if (verb === 'get' && what === 'Service')
       return JSON.stringify({ kind: 'Service', metadata: { name: args[2] }, spec: { type: 'ClusterIP', clusterIP: '10.96.0.20' }, status: {} });
     if (verb === 'config') return 'kind-cluster\n';

@@ -12,7 +12,8 @@ const cp = vi.hoisted(() => {
   const calls = { execFile: [] as { file: string; args: string[] }[] };
   const execFile = (file: string, args: string[], _opts: unknown, cb: (e: unknown, o: string, s: string) => void) => {
     calls.execFile.push({ file, args });
-    cb(null, args[0] === 'get' ? JSON.stringify({ status: {} }) : 'ok\n', '');
+    // 直し回14：応答の構造（kind・metadata.name）を検証するので、取得した種別・名前を返す
+    cb(null, args[0] === 'get' ? JSON.stringify({ kind: args[1], metadata: { name: args[2] }, status: {} }) : 'ok\n', '');
   };
   Object.defineProperty(execFile, Symbol.for('nodejs.util.promisify.custom'), {
     value: (file: string, args: string[], opts: unknown) =>

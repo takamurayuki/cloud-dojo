@@ -68,8 +68,9 @@ data:
   a: b
 `;
 
+// 直し回14：Deployment の ready には全体のレプリカ数（status.replicas）も要るので含める（実際の Deployment も返す項目）
 const deploy = (available: number, extra: Record<string, unknown> = {}) =>
-  JSON.stringify({ kind: 'Deployment', metadata: { name: 'web', generation: 1 }, spec: { replicas: 2 }, status: { observedGeneration: 1, updatedReplicas: 2, availableReplicas: available, ...extra } });
+  JSON.stringify({ kind: 'Deployment', metadata: { name: 'web', generation: 1 }, spec: { replicas: 2 }, status: { observedGeneration: 1, replicas: 2, updatedReplicas: 2, availableReplicas: available, ...extra } });
 const svcReady = JSON.stringify({ kind: 'Service', metadata: { name: 'web-svc' }, spec: { type: 'ClusterIP', clusterIP: '10.96.0.20' }, status: {} });
 const cm = JSON.stringify({ kind: 'ConfigMap', metadata: { name: 'web-conf' }, data: { a: 'b' } });
 
@@ -150,7 +151,7 @@ describe('直し回13 推奨A：apply 後の確認失敗を ready・completed �
     const { svc } = service();
     const session = await svc.applyManifest(MANIFEST, 'demo');
     expect(session.status).toBe('completed');
-    expect(session.resources[0]).toMatchObject({ status: 'ready', detail: 'desired 2／updated 2／available 2' });
+    expect(session.resources[0]).toMatchObject({ status: 'ready', detail: 'desired 2／total 2／updated 2／available 2／unavailable 未報告' });
     expect(cp.calls.filter((a) => a[0] === 'get' && a[1] === 'Deployment')).toHaveLength(3);
     expect(cp.calls.filter((a) => a[0] === 'get' && a[1] === 'Service')).toHaveLength(1);
   });
@@ -160,7 +161,7 @@ describe('直し回13 推奨A：apply 後の確認失敗を ready・completed �
     cp.gets.set('Service/web-svc', [svcReady]);
     cp.gets.set('ConfigMap/web-conf', [cm]);
     const { svc, updates } = service();
-    await expect(svc.applyManifest(MANIFEST, 'demo')).rejects.toThrow(/Deployment\/web: 3回確認しても準備完了になりませんでした（desired 2／updated 2／available 1）/);
+    await expect(svc.applyManifest(MANIFEST, 'demo')).rejects.toThrow(/Deployment\/web: 3回確認しても準備完了になりませんでした（desired 2／total 2／updated 2／available 1／unavailable 未報告）/);
     expect(updates.some((u) => u.status === 'completed')).toBe(false);
   });
 
@@ -175,24 +176,31 @@ describe('直し回13 推奨A：apply 後の確認失敗を ready・completed �
 });
 
 describe('直し回13 推奨A：種別ごとの準備完了の判定（k8s-readiness.ts）', () => {
-  const st = (kind: string, obj: Record<string, unknown>) => judgeReadiness(kind, { kind, ...obj }).state;
+  // 直し回14：判定の前に構造（kind・metadata.name・status・数値項目）を検証するので、metadata（name・generation）を補う。
+  // コントローラ系は observedGeneration・全体のレプリカ数（status.replicas）等も ready の条件に入ったため、各例に含める。
+  const st = (kind: string, obj: Record<string, unknown>) =>
+    judgeReadiness(kind, { kind, ...obj, metadata: { name: 'x', generation: 1, ...(obj.metadata as object) } }).state;
+  const ds = (s: Record<string, unknown>) => ({ status: { observedGeneration: 1, currentNumberScheduled: 3, numberReady: 3, numberMisscheduled: 0, ...s } });
 
-  it('Deployment：updated・available が desired 以上で ready。observedGeneration の遅れは pending', () => {
-    expect(st('Deployment', { spec: { replicas: 3 }, status: { updatedReplicas: 3, availableReplicas: 3 } })).toBe('ready');
-    expect(st('Deployment', { spec: { replicas: 3 }, status: { updatedReplicas: 3, availableReplicas: 2 } })).toBe('pending');
-    expect(st('Deployment', { spec: {}, status: { updatedReplicas: 1, availableReplicas: 1 } })).toBe('ready'); // replicas 省略は 1
-    expect(st('Deployment', { metadata: { generation: 2 }, spec: { replicas: 1 }, status: { observedGeneration: 1, updatedReplicas: 1, availableReplicas: 1 } })).toBe('pending');
-    expect(st('Deployment', { spec: { replicas: 0 }, status: {} })).toBe('ready');
+  it('Deployment：全体・updated・available が desired と一致で ready。observedGeneration の遅れは pending', () => {
+    expect(st('Deployment', { spec: { replicas: 3 }, status: { observedGeneration: 1, replicas: 3, updatedReplicas: 3, availableReplicas: 3 } })).toBe('ready');
+    expect(st('Deployment', { spec: { replicas: 3 }, status: { observedGeneration: 1, replicas: 3, updatedReplicas: 3, availableReplicas: 2 } })).toBe('pending');
+    // 直し回14（必須2）：spec.replicas の省略を 1 と補わない（API サーバーは必ず返す）→ 確認できない応答
+    expect(st('Deployment', { spec: {}, status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 1 } })).toBe('failed');
+    expect(st('Deployment', { metadata: { generation: 2 }, spec: { replicas: 1 }, status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 1 } })).toBe('pending');
+    // 直し回14（必須2）：数が揃っていない 0 レプリカ（status が空）は ready にしない（observedGeneration 未報告で pending）
+    expect(st('Deployment', { spec: { replicas: 0 }, status: {} })).toBe('pending');
   });
 
   it('StatefulSet・ReplicaSet・DaemonSet', () => {
-    expect(st('StatefulSet', { spec: { replicas: 2 }, status: { readyReplicas: 2, updatedReplicas: 2 } })).toBe('ready');
-    expect(st('StatefulSet', { spec: { replicas: 2 }, status: { readyReplicas: 1, updatedReplicas: 2 } })).toBe('pending');
-    expect(st('ReplicaSet', { spec: { replicas: 2 }, status: { availableReplicas: 2 } })).toBe('ready');
-    expect(st('ReplicaSet', { spec: { replicas: 2 }, status: {} })).toBe('pending');
-    expect(st('DaemonSet', { status: { desiredNumberScheduled: 3, updatedNumberScheduled: 3, numberAvailable: 3 } })).toBe('ready');
-    expect(st('DaemonSet', { status: { desiredNumberScheduled: 3, updatedNumberScheduled: 3, numberAvailable: 2 } })).toBe('pending');
-    expect(st('DaemonSet', { status: {} })).toBe('pending');
+    expect(st('StatefulSet', { spec: { replicas: 2 }, status: { observedGeneration: 1, replicas: 2, readyReplicas: 2, updatedReplicas: 2, availableReplicas: 2 } })).toBe('ready');
+    expect(st('StatefulSet', { spec: { replicas: 2 }, status: { observedGeneration: 1, replicas: 2, readyReplicas: 1, updatedReplicas: 2, availableReplicas: 1 } })).toBe('pending');
+    expect(st('ReplicaSet', { spec: { replicas: 2 }, status: { observedGeneration: 1, replicas: 2, readyReplicas: 2, availableReplicas: 2 } })).toBe('ready');
+    expect(st('ReplicaSet', { spec: { replicas: 2 }, status: { observedGeneration: 1, replicas: 0 } })).toBe('pending');
+    expect(st('DaemonSet', ds({ desiredNumberScheduled: 3, updatedNumberScheduled: 3, numberAvailable: 3 }))).toBe('ready');
+    expect(st('DaemonSet', ds({ desiredNumberScheduled: 3, updatedNumberScheduled: 3, numberAvailable: 2 }))).toBe('pending');
+    // 直し回14（必須2）：desiredNumberScheduled 等は 0 でも必ず返されるので、空の status は待たずに確認できない応答
+    expect(st('DaemonSet', { status: {} })).toBe('failed');
   });
 
   it('Pod：Running かつ Ready True、または Succeeded で ready。Failed は failed。それ以外は pending', () => {
@@ -207,12 +215,14 @@ describe('直し回13 推奨A：種別ごとの準備完了の判定（k8s-readi
     expect(st('Job', { status: { conditions: [{ type: 'Complete', status: 'True' }] } })).toBe('ready');
     expect(st('Job', { status: { conditions: [{ type: 'Failed', status: 'True', reason: 'BackoffLimitExceeded' }] } })).toBe('failed');
     expect(st('Job', { status: { active: 1 } })).toBe('pending');
-    expect(st('Service', { spec: { clusterIP: '10.0.0.1' } })).toBe('ready');
-    expect(st('Service', { spec: { clusterIP: 'None' } })).toBe('ready'); // headless
-    expect(st('Service', { spec: {} })).toBe('pending');
+    // 直し回14（必須2）：Service は spec.type（API サーバーが必ず補う）と status を必須にした。type 省略を ClusterIP と補わない
+    expect(st('Service', { spec: { type: 'ClusterIP', clusterIP: '10.0.0.1' }, status: {} })).toBe('ready');
+    expect(st('Service', { spec: { type: 'ClusterIP', clusterIP: 'None' }, status: {} })).toBe('ready'); // headless
+    expect(st('Service', { spec: { type: 'ClusterIP' }, status: {} })).toBe('pending');
+    expect(st('Service', { spec: { clusterIP: '10.0.0.1' }, status: {} })).toBe('failed');
     expect(st('Service', { spec: { type: 'LoadBalancer', clusterIP: '10.0.0.1' }, status: { loadBalancer: {} } })).toBe('pending');
     expect(st('Service', { spec: { type: 'LoadBalancer', clusterIP: '10.0.0.1' }, status: { loadBalancer: { ingress: [{ ip: '1.2.3.4' }] } } })).toBe('ready');
-    expect(st('Service', { spec: { type: 'ExternalName', externalName: 'example.com' } })).toBe('ready');
+    expect(st('Service', { spec: { type: 'ExternalName', externalName: 'example.com' }, status: {} })).toBe('ready');
     expect(st('PersistentVolumeClaim', { status: { phase: 'Bound' } })).toBe('ready');
     expect(st('PersistentVolumeClaim', { status: { phase: 'Pending' } })).toBe('pending');
     expect(st('PersistentVolumeClaim', { status: { phase: 'Lost' } })).toBe('failed');
