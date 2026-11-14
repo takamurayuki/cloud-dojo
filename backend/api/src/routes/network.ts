@@ -72,6 +72,22 @@ async function resolveReusableLabNetwork(name: string): Promise<Docker.Network |
   return docker.getNetwork(info.Id);
 }
 
+/**
+ * /lab/create：変更を始める前の存在確認（inspect）が 404 以外で失敗した（直し回10 必須）。
+ * 500・通信エラー等では対象のラベル・Mounts を確かめられないので、「存在しない」とは読み替えず、何も作成・削除せずに中止する
+ */
+class LabPrecheckFailedError extends Error {
+  readonly code = 'LAB_PRECHECK_FAILED';
+  constructor(target: string, cause: unknown) {
+    super(
+      `${target} の存在確認（inspect）に失敗したため、確かめられないまま変更しないよう、何も作成・削除せずに中止しました: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+    this.name = 'LabPrecheckFailedError';
+  }
+}
+
 /** 後始末で削除できなかったもの。名前・ID と、手で削除するための復旧手順を持つ（直し回6 推奨B） */
 interface LabCreateRemaining {
   kind: 'container' | 'network';
@@ -81,10 +97,21 @@ interface LabCreateRemaining {
   recovery: string;
 }
 
-/** 残存の説明文（応答の message・cleanup.message とログに使う） */
-function describeLabRemaining(remaining: LabCreateRemaining[]): string {
+/** 削除できなかったものの記録（復旧手順つき） */
+function remainingEntry(kind: 'container' | 'network', target: { name: string; id: string }, error: unknown): LabCreateRemaining {
+  return {
+    kind,
+    name: target.name,
+    id: target.id,
+    error: error instanceof Error ? error.message : String(error),
+    recovery: kind === 'container' ? `docker rm -f ${target.id}` : `docker network rm ${target.id}`,
+  };
+}
+
+/** 残存の説明文（応答の message・cleanup.message とログに使う）。lead は「この要求で作成した」等の対象の説明 */
+function describeLabRemaining(remaining: LabCreateRemaining[], lead = 'この要求で作成した'): string {
   return (
-    `この要求で作成した次のものを削除できず、残っています：${remaining
+    `${lead}次のものを削除できず、残っています：${remaining
       .map((r) => `${r.kind === 'container' ? 'コンテナ' : 'ネットワーク'} ${r.name}（${r.id}）: ${r.error}`)
       .join('; ')}。` +
     `復旧手順：${remaining.map((r) => r.recovery).join(' → ')} の順に実行して削除してください`
@@ -104,14 +131,7 @@ async function rollbackLabCreate(
       removed.push(target.id);
     } catch (error) {
       if (isNotFound(error)) removed.push(target.id);
-      else
-        remaining.push({
-          kind,
-          name: target.name,
-          id: target.id,
-          error: error instanceof Error ? error.message : String(error),
-          recovery: kind === 'container' ? `docker rm -f ${target.id}` : `docker network rm ${target.id}`,
-        });
+      else remaining.push(remainingEntry(kind, target, error));
     }
   };
   for (const c of containers) await attempt('container', c, () => docker.getContainer(c.id).remove({ force: true }));
@@ -140,14 +160,21 @@ export async function networkRoutes(fastify: FastifyInstance) {
       const { nodeCount, networkName } = body;
 
       // 固定名 network-node-<i> の既存コンテナは作り直しのため削除する。パイロットのラボ（ラベル cloud-dojo.lab）が
-      // その名前を持つ場合は、何も作成・削除しないうちに 403 で拒否する。削除は確かめた完全な ID に対して行う
+      // その名前を持つ場合は、何も作成・削除しないうちに 403 で拒否する。削除は確かめた完全な ID に対して行う。
+      // 直し回10（必須）：「存在しない」とするのは inspect の 404 だけ。それ以外の失敗（500・通信エラー等）はラベル・Mounts を
+      // 確かめられないので、その時点で（何も作成・削除・pull しないうちに）LabPrecheckFailedError で中止する
       const existingNodes: Array<Docker.Container | null> = [];
       for (let i = 1; i <= nodeCount; i++) {
+        const nodeName = `network-node-${i}`;
         try {
-          existingNodes.push(await resolveUnprotectedContainer(docker, `network-node-${i}`));
+          existingNodes.push(await resolveUnprotectedContainer(docker, nodeName));
         } catch (error) {
           if (error instanceof PilotLabProtectedError) throw error;
-          existingNodes.push(null); // 存在しない等（従来どおり無視する）
+          if (isNotFound(error)) {
+            existingNodes.push(null); // 存在しない
+            continue;
+          }
+          throw new LabPrecheckFailedError(`コンテナ ${nodeName}`, error);
         }
       }
 
@@ -155,11 +182,16 @@ export async function networkRoutes(fastify: FastifyInstance) {
       // 確かめてから再利用する。確かめられなければ、何も作成・削除せずに拒否する（通常のコンテナを別用途のネットワークへ参加させない）
       let reuseNetwork = await resolveReusableLabNetwork(networkName);
 
-      // Alpine イメージの確認とpull
+      // Alpine イメージの確認とpull（直し回10：pull するのは inspect が 404 のときだけ。それ以外の失敗は何も変更せずに中止する）
+      let imageMissing = false;
       try {
         await docker.getImage('alpine:latest').inspect();
         fastify.log.info('Alpine image already exists');
       } catch (error) {
+        if (!isNotFound(error)) throw new LabPrecheckFailedError('イメージ alpine:latest', error);
+        imageMissing = true;
+      }
+      if (imageMissing) {
         fastify.log.info('Pulling alpine image...');
         await new Promise((resolve, reject) => {
           docker.pull('alpine:latest', (err: any, stream: any) => {
@@ -210,11 +242,12 @@ export async function networkRoutes(fastify: FastifyInstance) {
       for (let i = 1; i <= nodeCount; i++) {
         const containerName = `network-node-${i}`;
 
-        // 既存のコンテナを削除（上で確かめた ID に対して行う）
+        // 既存のコンテナを削除（上で確かめた ID に対して行う）。直し回10：無視するのは 404（確認後に消えた）だけ。
+        // それ以外の削除失敗は読み飛ばさずに作成を中止し、この要求で作成したものを後始末する（下の catch）
         try {
           await existingNodes[i - 1]?.remove({ force: true });
         } catch (error) {
-          // コンテナが存在しない場合は無視
+          if (!isNotFound(error)) throw error;
         }
 
         const container = await docker.createContainer({
@@ -260,6 +293,11 @@ export async function networkRoutes(fastify: FastifyInstance) {
     } catch (error) {
       if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       if (error instanceof LabNetworkUnverifiedError) return reply.code(409).send({ error: error.code, message: error.message });
+      if (error instanceof LabPrecheckFailedError) {
+        // 変更を始める前の中止なので、後始末の対象は無い（createdNetwork・createdContainers は空のまま）
+        fastify.log.error({ error }, 'Network lab precheck failed');
+        return reply.code(500).send({ error: error.code, message: error.message });
+      }
       fastify.log.error({ error }, 'Failed to create network lab');
       // この要求でネットワークを作成した後に失敗した場合は、この要求で作成したコンテナとネットワークを、作成時の ID で削除する。
       // 削除できなかったものは応答の cleanup.remaining とログに残存として明示する（再利用した既存のネットワークは削除しない）
@@ -344,42 +382,56 @@ export async function networkRoutes(fastify: FastifyInstance) {
           label: ['cloud-dojo=network-lab'],
         },
       });
-      const containerHandles: Docker.Container[] = [];
+      const containerHandles: { name: string; id: string; handle: Docker.Container }[] = [];
       for (const c of containers) {
         try {
-          containerHandles.push(await resolveUnprotectedContainer(docker, c.Id));
+          const handle = await resolveUnprotectedContainer(docker, c.Id);
+          containerHandles.push({ name: (c.Names?.[0] ?? c.Id).replace(/^\//, ''), id: c.Id, handle });
         } catch (error) {
           if (isNotFound(error)) continue; // 一覧の後に消えた
           throw error;
         }
       }
-      const networkHandles: Docker.Network[] = [];
+      const networkHandles: { name: string; id: string; handle: Docker.Network }[] = [];
       for (const n of networks) {
         try {
-          networkHandles.push(await resolveUnprotectedNetwork(docker, n.Id));
+          const handle = await resolveUnprotectedNetwork(docker, n.Id);
+          networkHandles.push({ name: n.Name ?? n.Id, id: n.Id, handle });
         } catch (error) {
           if (isNotFound(error)) continue;
           throw error;
         }
       }
 
+      // 直し回10：削除の失敗は読み飛ばさない。404（確認後に消えた）は削除済みとして扱い、それ以外（使用中・500・通信エラー等）は
+      // 残存として名前・ID・復旧手順を応答とログに出す（成功とは返さない）
+      const removed: string[] = [];
+      const remaining: LabCreateRemaining[] = [];
+      const attempt = async (kind: 'container' | 'network', target: { name: string; id: string }, op: () => Promise<unknown>) => {
+        try {
+          await op();
+          removed.push(target.id);
+        } catch (error) {
+          if (isNotFound(error)) removed.push(target.id);
+          else remaining.push(remainingEntry(kind, target, error));
+        }
+      };
+
       // ラボのコンテナを停止・削除
-      await Promise.all(
-        containerHandles.map(async (container) => {
-          await container.remove({ force: true });
-        })
-      );
+      await Promise.all(containerHandles.map((c) => attempt('container', c, () => c.handle.remove({ force: true }))));
 
       // ラボのネットワークを削除
-      await Promise.all(
-        networkHandles.map(async (network) => {
-          try {
-            await network.remove();
-          } catch (error) {
-            // ネットワークが使用中の場合は無視
-          }
-        })
-      );
+      await Promise.all(networkHandles.map((n) => attempt('network', n, () => n.handle.remove())));
+
+      if (remaining.length > 0) {
+        const message = describeLabRemaining(remaining, 'ネットワークラボの');
+        fastify.log.error({ remaining }, `Network lab cleanup left resources: ${message}`);
+        return reply.code(500).send({
+          error: 'Failed to cleanup lab',
+          message,
+          cleanup: { removed, remaining, message },
+        });
+      }
 
       return { message: 'Network lab cleaned up successfully' };
     } catch (error) {
