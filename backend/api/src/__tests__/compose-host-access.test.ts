@@ -430,6 +430,8 @@ describe('直し回5 推奨B：作成途中で失敗したら、この回に作�
     const job = runComposeUpJob(composeService, { composeYaml: TWO_NET_YAML, projectName: 'proj' });
     await expect(job).rejects.toThrow(/proj_app（netid-proj_app） は削除できず残っています（docker network rm netid-proj_app/);
     expect(errorLog.mock.calls.some((c) => String(c[0]).includes('netid-proj_app') && String(c[0]).includes('残っています'))).toBe(true);
+    // 直し回6 推奨B：専用ログにも削除手順を出す
+    expect(errorLog.mock.calls.some((c) => String(c[0]).includes('proj_app') && String(c[0]).includes('docker network rm netid-proj_app'))).toBe(true);
     expect(stub.calls.create).toEqual([]);
   });
 
@@ -455,7 +457,10 @@ describe('直し回5 推奨B：作成途中で失敗したら、この回に作�
     stub.behaviour.failNetworkRemove.add('netid-lab-network');
     const r = await app.inject({ method: 'POST', url: '/api/network/lab/create', payload: { nodeCount: 2 } });
     expect(r.statusCode).toBe(500);
-    expect(r.json().cleanup.remaining).toEqual([{ kind: 'network', id: 'netid-lab-network', error: 'network has active endpoints' }]);
+    // 直し回6 推奨B：残存に名前と復旧手順を加えた（kind・id・error は従来どおり）
+    expect(r.json().cleanup.remaining).toEqual([
+      { kind: 'network', name: 'lab-network', id: 'netid-lab-network', error: 'network has active endpoints', recovery: 'docker network rm netid-lab-network' },
+    ]);
   });
 
   it('/lab/create：再利用した既存のネットワークは、失敗しても削除しない', async () => {

@@ -72,25 +72,51 @@ async function resolveReusableLabNetwork(name: string): Promise<Docker.Network |
   return docker.getNetwork(info.Id);
 }
 
+/** 後始末で削除できなかったもの。名前・ID と、手で削除するための復旧手順を持つ（直し回6 推奨B） */
+interface LabCreateRemaining {
+  kind: 'container' | 'network';
+  name: string;
+  id: string;
+  error: string;
+  recovery: string;
+}
+
+/** 残存の説明文（応答の message・cleanup.message とログに使う） */
+function describeLabRemaining(remaining: LabCreateRemaining[]): string {
+  return (
+    `この要求で作成した次のものを削除できず、残っています：${remaining
+      .map((r) => `${r.kind === 'container' ? 'コンテナ' : 'ネットワーク'} ${r.name}（${r.id}）: ${r.error}`)
+      .join('; ')}。` +
+    `復旧手順：${remaining.map((r) => r.recovery).join(' → ')} の順に実行して削除してください`
+  );
+}
+
 /** /lab/create の作成途中の失敗の後始末：この要求で作成したコンテナ、次にネットワークを ID で削除する */
 async function rollbackLabCreate(
   network: { name: string; id: string },
-  containerIds: string[],
-): Promise<{ removed: string[]; remaining: { kind: 'container' | 'network'; id: string; error: string }[] }> {
+  containers: { name: string; id: string }[],
+): Promise<{ removed: string[]; remaining: LabCreateRemaining[]; message?: string }> {
   const removed: string[] = [];
-  const remaining: { kind: 'container' | 'network'; id: string; error: string }[] = [];
-  const attempt = async (kind: 'container' | 'network', id: string, op: () => Promise<unknown>) => {
+  const remaining: LabCreateRemaining[] = [];
+  const attempt = async (kind: 'container' | 'network', target: { name: string; id: string }, op: () => Promise<unknown>) => {
     try {
       await op();
-      removed.push(id);
+      removed.push(target.id);
     } catch (error) {
-      if (isNotFound(error)) removed.push(id);
-      else remaining.push({ kind, id, error: error instanceof Error ? error.message : String(error) });
+      if (isNotFound(error)) removed.push(target.id);
+      else
+        remaining.push({
+          kind,
+          name: target.name,
+          id: target.id,
+          error: error instanceof Error ? error.message : String(error),
+          recovery: kind === 'container' ? `docker rm -f ${target.id}` : `docker network rm ${target.id}`,
+        });
     }
   };
-  for (const id of containerIds) await attempt('container', id, () => docker.getContainer(id).remove({ force: true }));
-  await attempt('network', network.id, () => docker.getNetwork(network.id).remove());
-  return { removed, remaining };
+  for (const c of containers) await attempt('container', c, () => docker.getContainer(c.id).remove({ force: true }));
+  await attempt('network', network, () => docker.getNetwork(network.id).remove());
+  return remaining.length > 0 ? { removed, remaining, message: describeLabRemaining(remaining) } : { removed, remaining };
 }
 
 export async function networkRoutes(fastify: FastifyInstance) {
@@ -98,7 +124,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
   fastify.post('/lab/create', async (request, reply) => {
     // この要求で作成したネットワーク・コンテナの ID（作成途中で失敗したときの後始末に使う。直し回5 推奨B）
     let createdNetwork: { name: string; id: string } | null = null;
-    const createdContainers: string[] = [];
+    const createdContainers: { name: string; id: string }[] = [];
     try {
       // Docker起動状態を確認
       const dockerStatus = await checkDockerStatus();
@@ -211,7 +237,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
           },
         });
 
-        createdContainers.push(container.id);
+        createdContainers.push({ name: containerName, id: container.id });
 
         await container.start();
 
@@ -238,12 +264,15 @@ export async function networkRoutes(fastify: FastifyInstance) {
       // この要求でネットワークを作成した後に失敗した場合は、この要求で作成したコンテナとネットワークを、作成時の ID で削除する。
       // 削除できなかったものは応答の cleanup.remaining とログに残存として明示する（再利用した既存のネットワークは削除しない）
       const cleanup = createdNetwork ? await rollbackLabCreate(createdNetwork, createdContainers) : undefined;
-      if (cleanup && cleanup.remaining.length > 0) {
-        fastify.log.error({ remaining: cleanup.remaining }, 'Network lab creation failed and created resources remain');
+      const baseMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (cleanup?.message) {
+        // 名前・ID・復旧手順をログにも残す（直し回6 推奨B）
+        fastify.log.error({ remaining: cleanup.remaining }, `Network lab creation failed and created resources remain: ${cleanup.message}`);
       }
       return reply.code(500).send({
         error: 'Failed to create network lab',
-        message: error instanceof Error ? error.message : 'Unknown error',
+        // 画面（NetworkBasics.tsx）は message をそのまま表示するので、残存があれば名前と復旧手順を付け足す
+        message: cleanup?.message ? `${baseMessage}。${cleanup.message}` : baseMessage,
         ...(cleanup ? { cleanup } : {}),
       });
     }

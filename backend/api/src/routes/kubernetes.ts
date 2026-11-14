@@ -3,6 +3,7 @@ import * as yaml from 'js-yaml';
 import { k8sService } from '../services/kubernetes';
 import { addK8sDeployTask } from '../services/queue';
 import { K8sInputError, parseTailQuery, validateManifestDocs, validateNamespace } from '../services/k8s-args';
+import { K8sManifestRejectedError } from '../services/k8s-manifest-guard';
 
 /**
  * 入力が Kubernetes の名前として妥当でなければ 400 `K8S_INVALID_INPUT`（kubectl は起動しない）。それ以外は従来どおり 500。
@@ -12,6 +13,10 @@ import { K8sInputError, parseTailQuery, validateManifestDocs, validateNamespace 
 function sendError(reply: FastifyReply, error: unknown) {
   if (error instanceof K8sInputError) {
     return reply.code(400).send({ error: error.code, field: error.field, message: error.message });
+  }
+  // 直し回6（必須3）：ノードを操作できる設定を含むマニフェスト。キューに入れず、何も適用しない
+  if (error instanceof K8sManifestRejectedError) {
+    return reply.code(400).send({ error: error.code, message: error.message, violations: error.violations });
   }
   return reply.code(500).send({ error: error instanceof Error ? error.message : String(error) });
 }

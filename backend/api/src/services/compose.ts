@@ -1,6 +1,6 @@
 import Docker from 'dockerode';
 import { EventEmitter } from 'events';
-import { isNotFound, isPilotLabLabels, PilotLabProtectedError } from '../pilot/lab/protect';
+import { assertContainerOperable, isNotFound, isPilotLabLabels, PilotLabProtectedError, type MountLike } from '../pilot/lab/protect';
 import { ComposeDefinitionRejectedError, inspectBinds, inspectComposeDefinition, type ComposeViolation } from './compose-guard';
 
 const docker = new Docker();
@@ -111,6 +111,11 @@ export interface ComposeSession {
    * 作成時の ID で削除する。削除できなかったもの（remaining）があればジョブは失敗にし、残存を明示する
    */
   networkRollback?: { removed: { name: string; id: string }[]; remaining: { name: string; id: string; error: string }[] };
+  /**
+   * コンテナを1つも作成しないうちに compose up 全体を中止した理由（直し回6 推奨A）。ネットワークの inspect の通信エラー等で
+   * 確認済みの ID を得られなかった場合など。あればジョブは失敗にする（以前は session.error に残すだけで success:true を返していた）
+   */
+  setupFailure?: string;
 }
 
 /**
@@ -180,9 +185,12 @@ export async function runComposeUpJob(
           .join('; ')}）。元の失敗：${session.error ?? '不明'}`,
       );
     }
+    if (session.setupFailure) throw new Error(session.setupFailure);
     if (session.protectedRejections && session.protectedRejections.length > 0) {
       const detail = session.protectedRejections.map((name) => `${name}: ${session.services[name]?.error ?? ''}`).join('; ');
-      throw new Error(`パイロットのラボを保護するため、次のサービスの既存コンテナを停止・削除せずに中止しました（${detail}）`);
+      throw new Error(
+        `パイロットのラボ（または Docker ソケットをマウントしたコンテナ）を保護するため、次のサービスの既存コンテナを停止・削除せずに中止しました（${detail}）`,
+      );
     }
     await updateProgress(100);
     return {
@@ -535,10 +543,15 @@ export class DockerComposeService extends EventEmitter {
 
         try {
           // Remove any existing container with the same name
-          // （パイロットのラボ（ラベル cloud-dojo.lab）なら拒否する。操作は inspect で確かめた完全な ID に対して行う）
+          // （パイロットのラボ（ラベル cloud-dojo.lab）、または Docker ソケットをマウントしたコンテナ（直し回6 必須2）なら拒否する。
+          // 操作は inspect で確かめた完全な ID に対して行う）
           try {
             const containerInfo = await docker.getContainer(`${projectName}_${serviceName}`).inspect();
-            if (isPilotLabLabels(containerInfo.Config?.Labels)) throw new PilotLabProtectedError(containerInfo.Id);
+            assertContainerOperable({
+              Id: containerInfo.Id,
+              Labels: containerInfo.Config?.Labels,
+              Mounts: containerInfo.Mounts as MountLike[] | undefined,
+            });
             const existingContainer = docker.getContainer(containerInfo.Id);
             if (containerInfo.State.Running) {
               await existingContainer.stop();
@@ -733,8 +746,14 @@ export class DockerComposeService extends EventEmitter {
       console.log(`📡 Sent final session update to frontend`);
 
     } catch (error: any) {
+      // ここに来るのは、サービスのコンテナを作成する前（依存関係の整理・ネットワークの準備）の失敗だけ
+      // （サービスごとの失敗は上のループ内で記録する）。ジョブを失敗にするため setupFailure にも入れる（直し回6 推奨A）
       session.status = 'error';
       session.error = error.message;
+      session.setupFailure = `コンテナを作成する前に失敗したため、compose up を中止しました（${error?.message ?? String(error)}）`;
+      for (const name of Object.keys(session.services)) {
+        if (session.services[name].status === 'pending') session.services[name].status = 'error';
+      }
       this.emit('update', session);
     }
 
@@ -755,7 +774,10 @@ export class DockerComposeService extends EventEmitter {
         }
         const message = error instanceof Error ? error.message : String(error);
         result.remaining.push({ ...n, error: message });
-        console.error(`⚠️ 作成したネットワーク ${n.name}（${n.id}）を削除できず、残っています: ${message}`);
+        console.error(
+          `⚠️ 作成したネットワーク ${n.name}（${n.id}）を削除できず、残っています: ${message}。` +
+            `復旧手順：docker network rm ${n.id} で削除してください（接続中のコンテナがあれば、先に docker rm -f でそのコンテナを削除する）`,
+        );
       }
     }
     if (result.removed.length > 0) console.log(`🧹 作成途中で失敗したため、この回に作成したネットワークを削除しました: ${result.removed.map((n) => n.name).join(', ')}`);
@@ -771,10 +793,11 @@ export class DockerComposeService extends EventEmitter {
       );
       const networks = await docker.listNetworks();
       const projectNetworks = networks.filter((n) => n.Name?.startsWith(`${projectName}_`));
-      // パイロットのラボ（ラベル cloud-dojo.lab）が含まれていれば、何も停止・削除せずに拒否する
-      const protectedOne =
-        projectContainers.find((c) => isPilotLabLabels(c.Labels)) ?? projectNetworks.find((n) => isPilotLabLabels(n.Labels));
-      if (protectedOne) throw new PilotLabProtectedError(protectedOne.Id);
+      // パイロットのラボ（ラベル cloud-dojo.lab）、または Docker ソケットをマウントしたコンテナ（直し回6 必須2）が
+      // 含まれていれば、何も停止・削除せずに拒否する
+      for (const c of projectContainers) assertContainerOperable({ Id: c.Id, Labels: c.Labels, Mounts: c.Mounts as MountLike[] | undefined });
+      const protectedNetwork = projectNetworks.find((n) => isPilotLabLabels(n.Labels));
+      if (protectedNetwork) throw new PilotLabProtectedError(protectedNetwork.Id);
       
       const totalSteps = projectContainers.length + 1; // containers + networks
       let currentStep = 0;

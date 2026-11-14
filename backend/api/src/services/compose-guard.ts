@@ -113,9 +113,13 @@ export function defaultSocketCheckEnv(extraSockets: string[] = []): SocketCheckE
 
 const WELL_KNOWN_SOCKETS = ['/var/run/docker.sock', '/run/docker.sock'];
 
-/** 区切りの統一・~ の展開・相対パスの解決・..／.／重複／末尾スラッシュの正規化 */
+/**
+ * ~ の展開・相対パスの解決・..／.／重複／末尾スラッシュの正規化。
+ * 直し回6（必須1）：`\` は区切りとして扱わない（Linux ではファイル名の文字であり、Docker もそのまま渡す）。
+ * `\` を含むパスは dockerSocketReason が判定の前に拒否するので、ここに来るパスには含まれない。
+ */
 function normalizeHostPath(raw: string, env: SocketCheckEnv): string {
-  let p = raw.trim().replace(/\\/g, '/');
+  let p = raw.trim();
   if (p === '~' || p.startsWith('~/')) p = env.homedir + p.slice(1);
   // 先頭の重複スラッシュ（//var/run/docker.sock：Windows・macOS の Docker でも使われる書き方）は1つにする
   p = p.replace(/^\/{2,}/, '/');
@@ -144,7 +148,7 @@ function realish(p: string, env: SocketCheckEnv, depth = 0): string {
       if (depth < 40) {
         try {
           const link = env.readlink(cur);
-          const target = path.posix.resolve(path.posix.dirname(cur), link.replace(/\\/g, '/'));
+          const target = path.posix.resolve(path.posix.dirname(cur), link);
           return realish(rest.length ? path.posix.join(target, ...[...rest].reverse()) : target, env, depth + 1);
         } catch {
           // リンクではない、または存在しない
@@ -172,6 +176,11 @@ export function dockerSocketReason(raw: string, env: SocketCheckEnv = defaultSoc
   if (/^\/\/[.?]\/pipe\/docker/.test(slashed) || slashed.includes('/pipe/docker_engine')) {
     return `${raw} は Docker Engine の名前付きパイプ`;
   }
+  // 直し回6（必須1）：`\` を含むパスは判定不能として拒否する。Linux では `\` はファイル名の文字で、Docker は元の文字列のまま
+  // 渡す。以前は `\` を `/` に置き換えてから調べたため、`/srv/innocent\alias`（ソケットへのリンク）を別のパス
+  // `/srv/innocent/alias` として調べ、通してしまっていた。置き換えずに調べる方式は OS ごとの解釈の違いを残すため、
+  // 安全側に倒して拒否する（通常の学習用途の bind に `\` を含むパスは要らない）。以後の判定は、渡す文字列そのものに対して行う
+  if (raw.includes('\\')) return `${raw} は \\ を含むため、指すものを判定できない（Linux では区切りではなくファイル名の文字）`;
   const lexical = normalizeHostPath(raw, env);
   const real = realish(lexical, env);
   const forms = new Set([lexical, real, aliasRun(lexical), aliasRun(real)]);
@@ -308,10 +317,17 @@ export function inspectComposeDefinition(composeYaml: string, env: SocketCheckEn
 export function inspectBinds(service: string, binds: string[], env: SocketCheckEnv = defaultSocketCheckEnv()): ComposeViolation[] {
   const out: ComposeViolation[] = [];
   for (const b of binds) {
+    // 直し回6（必須1）：Docker（Linux）が Binds を解釈するのと同じく、最初の `:` までを元パスとして調べる。
+    // 短い書式の解釈（Windows のドライブ指定を含む）と食い違う場合に備え、両方を調べる
+    const sources = new Set<string>();
     const src = shortSyntaxBindSource(b);
-    if (!src) continue;
-    const reason = dockerSocketReason(src, env);
-    if (reason) out.push({ service, field: 'volumes', detail: reason });
+    if (src) sources.add(src);
+    const dockerSrc = b.split(':')[0];
+    if (dockerSrc && (dockerSrc.startsWith('/') || dockerSrc.startsWith('.') || dockerSrc.includes('\\'))) sources.add(dockerSrc);
+    for (const p of sources) {
+      const reason = dockerSocketReason(p, env);
+      if (reason) out.push({ service, field: 'volumes', detail: reason });
+    }
   }
   return out;
 }

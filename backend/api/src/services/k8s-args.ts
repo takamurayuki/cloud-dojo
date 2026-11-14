@@ -10,6 +10,7 @@
  *
  * 判定は mock モードでも同じに行う（mock でだけ通る入力を作らない）。
  */
+import { assertManifestSafe } from './k8s-manifest-guard';
 
 /** 入力が Kubernetes の名前として妥当でない。ルートは 400 `K8S_INVALID_INPUT` で返す */
 export class K8sInputError extends Error {
@@ -64,6 +65,9 @@ export function parseTailQuery(v: string | undefined): number {
 /**
  * マニフェストの各リソースの kind・metadata.name（と metadata.namespace があればそれ）を検証する。
  * 実 kubectl では kind/name を `kubectl get` の引数に使うため、適用前に全件を確かめ、1つでも妥当でなければ何も適用しない。
+ * 直し回6（必須3）：続けて、ノードを操作できる設定（Docker ソケット等の hostPath、privileged、hostNetwork／hostPID／hostIPC、
+ * 許可外の capabilities）を k8s-manifest-guard.ts で検査し、あれば K8sManifestRejectedError を投げる。
+ * 受付（routes/kubernetes.ts）と Worker 側（services/kubernetes.ts の applyManifest）の両方がこの関数を使うので、検査は同じになる。
  */
 export function validateManifestDocs(docs: Array<{ kind?: unknown; metadata?: { name?: unknown; namespace?: unknown } } | null | undefined>) {
   docs.forEach((doc, i) => {
@@ -72,4 +76,5 @@ export function validateManifestDocs(docs: Array<{ kind?: unknown; metadata?: { 
     validateResourceName(doc.metadata?.name, `manifest[${i}].metadata.name`);
     if (doc.metadata?.namespace !== undefined) validateNamespace(doc.metadata.namespace, `manifest[${i}].metadata.namespace`);
   });
+  assertManifestSafe(docs);
 }
