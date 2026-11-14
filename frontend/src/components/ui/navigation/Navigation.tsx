@@ -15,11 +15,11 @@ import {
   Sun,
   Moon,
 } from 'lucide-react';
-import { ROUTES } from '@/config/constants';
+import { IS_PILOT, ROUTES } from '@/config/constants';
 import { useTheme } from '@/contexts/ThemeContext';
 import logoUrl from '@/assets/cloud-dojo-logo.png';
 
-const navItems = [
+const allNavItems = [
   {
     to: ROUTES.HOME,
     icon: LayoutDashboard,
@@ -64,6 +64,10 @@ const navItems = [
     color: 'from-emerald-500 to-teal-500',
   },
 ];
+
+// パイロットでは DB 前提で開けない Dashboard と Learning Path を出さない（'/' は N5 単元へリダイレクトする）
+const PILOT_HIDDEN: readonly string[] = [ROUTES.HOME, ROUTES.LEARNING];
+const navItems = IS_PILOT ? allNavItems.filter((item) => !PILOT_HIDDEN.includes(item.to)) : allNavItems;
 
 const NAV_PIN_KEY = 'nav-pinned';
 

@@ -15,6 +15,12 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
 - パイロットのフロントは `vite --mode pilot` で 127.0.0.1 のみで待ち受ける（通常の `pnpm dev` は従来どおり全インターフェース）。
   さらに Vite のプロキシは X-Forwarded-For で元の接続元を API に渡し、`/api/pilot` は接続元・転送ヘッダの
   どちらかが loopback 以外なら 403 にする。通常の開発起動で別端末から Vite 経由で届いた要求も拒否される。
+- パイロット API（`src/pilot/main.ts`）は `/api/pilot` に加えて、認証・DB に依存しないラボ系ルート
+  （`/api/docker`・`/api/compose`・`/api/k8s`・`/api/cicd`・`/api/network`）も登録する。auth／users／learning／ai／queue は
+  登録しない。ラボ保護（下記のラベル保護・Docker ソケット保護・定義の検証）は各ルート側にあるので、パイロットでもそのまま効く。
+  Docker が無い環境では、ラボ系 API は 503 などのエラー応答を返す。
+- パイロットのフロントはログインをしない。認証ガードは素通しで、ユーザー取得（`/api/auth/me`）もしない。
+  ナビは開ける項目だけで、DB 前提の Dashboard・Learning Path は出さない。`/`・`/learning`・`/login` は `/units/n5-tcp` へ送る。
 
 ## ラボの安全・整合の仕組み
 

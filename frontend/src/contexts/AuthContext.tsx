@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { IS_PILOT } from '@/config/constants';
 
 interface User {
   id: string;
@@ -24,12 +25,14 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  // パイロットには認証 API が無いので、ユーザー取得をしない（読み込み待ちにもしない）
+  const [loading, setLoading] = useState(!IS_PILOT);
   const navigate = useNavigate();
 
   const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
   useEffect(() => {
+    if (IS_PILOT) return;
     // ページロード時にトークンを確認
     const storedToken = localStorage.getItem('auth_token');
     if (storedToken) {
