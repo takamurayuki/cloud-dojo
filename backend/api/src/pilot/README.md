@@ -88,7 +88,7 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     どちらもキューのジョブが失敗として終わる。up は、保護したサービスを作り直さず、他のサービスの起動は従来どおり続けたうえで
     ジョブを失敗にする。このときの失敗理由には、保護の理由に続けて、起動したサービスと失敗したサービスを両方とも出す）。up の存在確認（既存コンテナ・ボリューム・イメージの inspect）は 404 だけを「存在しない」とし、
     それ以外の失敗（500・通信エラー等）ではそのサービスを作成しない。サービス個別の作成・起動の失敗もジョブの失敗にし、
-    失敗理由に起動したサービスと失敗したサービスを両方とも出す（一部だけ起動した場合も成功にはしない）。up の接続先ネットワーク `<project>_<network>` が既にあれば、名前の完全一致と、
+    失敗理由に起動したサービスと失敗したサービスを両方とも出す（一部だけ起動した場合も成功にはしない）。起動後の最終確認（作成したコンテナの inspect）が失敗したサービスも、確認できない状態を起動とはみなさずに失敗とし、ジョブを失敗にする（失敗理由にコンテナ ID と確認手順を出す）。up の接続先ネットワーク `<project>_<network>` が既にあれば、名前の完全一致と、
     このプロジェクトの compose ネットワークのラベル（この API が作成時に付ける `cloud-dojo=compose`・
     `cloud-dojo.compose.project`・`cloud-dojo.compose.network`、または Docker Compose が付ける `com.docker.compose.project`・
     `com.docker.compose.network`）を確かめた場合だけ接続する。確かめられなければ（パイロットのラベル、`cloud-dojo=network-lab`
@@ -101,7 +101,8 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     残存として記録したうえで残りのネットワークの削除も試みる。残存が1つでもあればジョブを失敗にし、失敗理由とログに残ったネットワークの
     名前・ID・理由・復旧手順（`docker network rm <ID>`）と、削除できたものを出す（以前は使用中を警告だけにして成功としていた）。
     down-volumes は、ネットワークが残ってもコンテナは削除済みなのでボリュームの削除は続け、そのうえでジョブを失敗にする
-    （保護による拒否・コンテナの削除失敗で down が中止した場合は、従来どおりボリュームに触れない）
+    （保護による拒否・コンテナの削除失敗で down が中止した場合は、従来どおりボリュームに触れない）。
+    ネットワークの残存が無くボリュームの削除だけが失敗した場合も、ジョブを失敗にし、最後の進捗（`down:progress`）を `error` にする
   - compose の定義（`POST /api/compose/up`）：ホストを操作できる設定を含む定義は、受付時に 400 `COMPOSE_DEFINITION_REJECTED`
     で拒否してキューに入れない。Worker 側の compose up でも同じ検査をし、Docker を何も操作しないうちにジョブを失敗にする。
     拒否するのは次の5つ（判定は YAML の解析結果と、この API が実際に Docker へ渡す bind mount に対して行う。パスは `..`・
@@ -129,7 +130,9 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   - CI/CD の real 実行（`POST /api/cicd/run` の `executionMode: real`）：許可パターン（`echo …`、`node`・`npm`・`pnpm`・
     `docker`・`git` の `--version`、`ls`、`pwd`、`date`、`whoami`）と引数まで完全に一致する行だけを、シェルを介さずに
     （execFile）実行する。シェルのメタ文字（`; & | $ ( ) < >`、バッククォート、改行、バックスラッシュ）を含む行は実行せずに
-    ステップを失敗させる。docker は `docker --version` だけなので、この経路でラボを停止・削除することはできない
+    ステップを失敗させる。許可した行の実行自体が失敗した場合（コマンドが無い・終了コードが0以外・時間切れ等）も、
+    模擬の結果には置き換えずにステップを失敗させる（模擬は `executionMode: simulation` を選んだときだけ）。
+    docker は `docker --version` だけなので、この経路でラボを停止・削除することはできない
   ログの取得（読み取り）は拒否しない。Docker を直接操作（docker CLI 等）した場合の干渉は防げない。
 
 - Node 22.5 以上が必要（`node:sqlite` を使う）。保存先の既定は `backend/api/.data/pilot.sqlite`（git 管理外）。

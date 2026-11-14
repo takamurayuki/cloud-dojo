@@ -456,9 +456,17 @@ export class CICDService extends EventEmitter {
         });
         return { stdout: String(stdout), stderr: String(stderr) };
       } catch (error: any) {
-        console.log(`⚠️  Real command failed, falling back to simulation: ${error.message}`);
-        // If command fails, fall back to simulation
-        return this.simulateCommand(command);
+        // 直し回12（推奨B）：許可された実コマンドの失敗は失敗として返す（以前は模擬の成功結果に置き換えていた）。
+        // 模擬は simulation モードを明示的に選んだときだけ使う
+        const detail = [
+          error?.code !== undefined ? `code ${error.code}` : null,
+          error?.signal ? `signal ${error.signal}` : null,
+          typeof error?.stderr === 'string' && error.stderr.trim() ? `stderr: ${error.stderr.trim()}` : null,
+        ].filter(Boolean);
+        console.log(`⚠️  Real command failed: ${error?.message ?? String(error)}`);
+        throw new Error(
+          `real 実行したコマンド（${command}）が失敗しました（${error?.message ?? String(error)}${detail.length > 0 ? `／${detail.join('／')}` : ''}）。模擬結果には置き換えません`,
+        );
       }
     } else {
       console.log(`🎭 Unsafe command, simulating: ${command}`);

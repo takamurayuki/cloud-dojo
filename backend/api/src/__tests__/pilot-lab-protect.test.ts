@@ -71,6 +71,8 @@ const stub = vi.hoisted(() => {
     createContainer: async (spec: { name: string; HostConfig?: { NetworkMode?: string } }) => {
       calls.create.push(spec.name);
       calls.networkMode.push({ name: spec.name, mode: spec.HostConfig?.NetworkMode });
+      // 直し回12：実際の Docker と同じく、作成したコンテナは inspect できる（起動後の最終確認が 404 で失敗しないように）
+      containers[`new-${spec.name}`] = { Id: `new-${spec.name}`, Name: `/${spec.name}`, Labels: {} };
       return {
         id: `new-${spec.name}`,
         start: async () => undefined,

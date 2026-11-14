@@ -118,11 +118,18 @@ export class DockerService extends EventEmitter {
                   this.emit('update', session);
                   resolve(session);
                 })
-                .catch(() => {
-                  session.status = 'completed';
+                .catch((inspectError: unknown) => {
+                  // 直し回12（推奨C）：ビルド後にイメージを確認できなかった場合は completed にしない。
+                  // ビルドの処理自体は終わっているので、その事実と確認できなかった理由を失敗理由に残す
+                  const message = inspectError instanceof Error ? inspectError.message : String(inspectError);
+                  const error = new Error(
+                    `ビルドの処理は終了しましたが、イメージ ${imageName}:${imageTag} を確認（inspect）できなかったため、完了とはみなしません（${message}）`,
+                  );
+                  session.status = 'error';
+                  session.error = error.message;
                   session.endTime = new Date();
                   this.emit('update', session);
-                  resolve(session);
+                  reject(error);
                 });
             }
           },

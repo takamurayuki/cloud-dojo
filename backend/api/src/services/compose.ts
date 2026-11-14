@@ -793,7 +793,17 @@ export class DockerComposeService extends EventEmitter {
               session.services[serviceName].error = `Container exited with code ${containerInfo.State.ExitCode}`;
             }
           } catch (err) {
+            // 直し回12（必須）：起動後の状態を確認できなかったサービスは running とみなさず、失敗にする
+            // （以前はログだけにして running のまま残し、全サービス起動として成功を返していた）。
+            // 作成・起動は済んでいるため、コンテナが残っている可能性と確認手順を失敗理由に入れる
+            const id = session.services[serviceName].containerId!;
             console.error(`⚠️ Failed to inspect ${serviceName}:`, err);
+            if (session.services[serviceName].status === 'running') {
+              session.services[serviceName].status = 'error';
+              session.services[serviceName].error =
+                `起動後の状態を確認（inspect）できなかったため、起動したとはみなしません（${describeError(err)}）。` +
+                `コンテナ ${id} は作成・起動済みで残っている可能性があります（確認：docker inspect ${id}）`;
+            }
           }
         }
       }
@@ -1022,7 +1032,21 @@ export class DockerComposeService extends EventEmitter {
         }
       }
     } catch (error) {
-      if (!residue) throw error;
+      if (!residue) {
+        // 直し回12（推奨A）：ネットワークの残存が無く、ボリュームの削除だけが失敗した場合も、最終の進捗を error にする
+        // （composeDown が先に送った completed を最後のイベントとして残さない）。例外は従来どおり元のエラーを投げる
+        const message = describeError(error);
+        this.emit('down:progress', {
+          projectName,
+          progress: 100,
+          status: 'error',
+          message:
+            `ボリュームの削除に失敗しました（${message}）。` +
+            `削除したボリューム：${result.removedVolumes.length > 0 ? result.removedVolumes.join(', ') : 'なし'}`,
+          removedVolumes: [...result.removedVolumes],
+        });
+        throw error;
+      }
       throw new ComposeDownResidueError(result, error instanceof Error ? error.message : String(error));
     }
     if (residue) throw new ComposeDownResidueError(result);
