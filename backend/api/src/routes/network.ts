@@ -3,7 +3,13 @@ import { z } from 'zod';
 import Docker from 'dockerode';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { PilotLabProtectedError, protectedBody, resolveUnprotectedContainer } from '../pilot/lab/protect';
+import {
+  isNotFound,
+  PilotLabProtectedError,
+  protectedBody,
+  resolveUnprotectedContainer,
+  resolveUnprotectedNetwork,
+} from '../pilot/lab/protect';
 
 const execAsync = promisify(exec);
 const docker = new Docker();
@@ -54,6 +60,18 @@ export async function networkRoutes(fastify: FastifyInstance) {
       const body = createNetworkLabSchema.parse(request.body);
       const { nodeCount, networkName } = body;
 
+      // 固定名 network-node-<i> の既存コンテナは作り直しのため削除する。パイロットのラボ（ラベル cloud-dojo.lab）が
+      // その名前を持つ場合は、何も作成・削除しないうちに 403 で拒否する。削除は確かめた完全な ID に対して行う
+      const existingNodes: Array<Docker.Container | null> = [];
+      for (let i = 1; i <= nodeCount; i++) {
+        try {
+          existingNodes.push(await resolveUnprotectedContainer(docker, `network-node-${i}`));
+        } catch (error) {
+          if (error instanceof PilotLabProtectedError) throw error;
+          existingNodes.push(null); // 存在しない等（従来どおり無視する）
+        }
+      }
+
       // Alpine イメージの確認とpull
       try {
         await docker.getImage('alpine:latest').inspect();
@@ -101,10 +119,9 @@ export async function networkRoutes(fastify: FastifyInstance) {
       for (let i = 1; i <= nodeCount; i++) {
         const containerName = `network-node-${i}`;
 
-        // 既存のコンテナを削除
+        // 既存のコンテナを削除（上で確かめた ID に対して行う）
         try {
-          const existingContainer = docker.getContainer(containerName);
-          await existingContainer.remove({ force: true });
+          await existingNodes[i - 1]?.remove({ force: true });
         } catch (error) {
           // コンテナが存在しない場合は無視
         }
@@ -147,6 +164,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
         message: `Created ${nodeCount} network nodes`,
       };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       fastify.log.error({ error }, 'Failed to create network lab');
       return reply.code(500).send({
         error: 'Failed to create network lab',
@@ -208,31 +226,48 @@ export async function networkRoutes(fastify: FastifyInstance) {
   // ネットワークラボ環境を削除
   fastify.delete('/lab/cleanup', async (request, reply) => {
     try {
-      // ラボのコンテナを停止・削除
+      // 対象（ラベル cloud-dojo=network-lab）を先に全て確かめる。パイロットのラボ（ラベル cloud-dojo.lab）を
+      // 併せ持つものが1つでもあれば、何も削除せずに 403 で拒否する。削除は確かめた完全な ID に対して行う
       const containers = await docker.listContainers({
         all: true,
         filters: {
           label: ['cloud-dojo=network-lab'],
         },
       });
-
-      await Promise.all(
-        containers.map(async (c) => {
-          const container = docker.getContainer(c.Id);
-          await container.remove({ force: true });
-        })
-      );
-
-      // ラボのネットワークを削除
       const networks = await docker.listNetworks({
         filters: {
           label: ['cloud-dojo=network-lab'],
         },
       });
+      const containerHandles: Docker.Container[] = [];
+      for (const c of containers) {
+        try {
+          containerHandles.push(await resolveUnprotectedContainer(docker, c.Id));
+        } catch (error) {
+          if (isNotFound(error)) continue; // 一覧の後に消えた
+          throw error;
+        }
+      }
+      const networkHandles: Docker.Network[] = [];
+      for (const n of networks) {
+        try {
+          networkHandles.push(await resolveUnprotectedNetwork(docker, n.Id));
+        } catch (error) {
+          if (isNotFound(error)) continue;
+          throw error;
+        }
+      }
 
+      // ラボのコンテナを停止・削除
       await Promise.all(
-        networks.map(async (n) => {
-          const network = docker.getNetwork(n.Id);
+        containerHandles.map(async (container) => {
+          await container.remove({ force: true });
+        })
+      );
+
+      // ラボのネットワークを削除
+      await Promise.all(
+        networkHandles.map(async (network) => {
           try {
             await network.remove();
           } catch (error) {
@@ -243,6 +278,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
 
       return { message: 'Network lab cleaned up successfully' };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       fastify.log.error({ error }, 'Failed to cleanup lab');
       return reply.code(500).send({
         error: 'Failed to cleanup lab',

@@ -1,5 +1,6 @@
 import Docker from 'dockerode';
 import { EventEmitter } from 'events';
+import { isPilotLabLabels, PilotLabProtectedError } from '../pilot/lab/protect';
 
 const docker = new Docker();
 
@@ -313,14 +314,17 @@ export class DockerComposeService extends EventEmitter {
 
         try {
           // Remove any existing container with the same name
+          // （パイロットのラボ（ラベル cloud-dojo.lab）なら拒否する。操作は inspect で確かめた完全な ID に対して行う）
           try {
-            const existingContainer = docker.getContainer(`${projectName}_${serviceName}`);
-            const containerInfo = await existingContainer.inspect();
+            const containerInfo = await docker.getContainer(`${projectName}_${serviceName}`).inspect();
+            if (isPilotLabLabels(containerInfo.Config?.Labels)) throw new PilotLabProtectedError(containerInfo.Id);
+            const existingContainer = docker.getContainer(containerInfo.Id);
             if (containerInfo.State.Running) {
               await existingContainer.stop();
             }
             await existingContainer.remove();
-          } catch {
+          } catch (error) {
+            if (error instanceof PilotLabProtectedError) throw error;
             // Container doesn't exist, which is fine
           }
 
@@ -529,6 +533,12 @@ export class DockerComposeService extends EventEmitter {
       const projectContainers = containers.filter(c => 
         c.Names[0]?.replace(/^\//, '').startsWith(`${projectName}_`)
       );
+      const networks = await docker.listNetworks();
+      const projectNetworks = networks.filter((n) => n.Name?.startsWith(`${projectName}_`));
+      // パイロットのラボ（ラベル cloud-dojo.lab）が含まれていれば、何も停止・削除せずに拒否する
+      const protectedOne =
+        projectContainers.find((c) => isPilotLabLabels(c.Labels)) ?? projectNetworks.find((n) => isPilotLabLabels(n.Labels));
+      if (protectedOne) throw new PilotLabProtectedError(protectedOne.Id);
       
       const totalSteps = projectContainers.length + 1; // containers + networks
       let currentStep = 0;
@@ -584,20 +594,17 @@ export class DockerComposeService extends EventEmitter {
         message: 'Removing networks...',
       });
       
-      const networks = await docker.listNetworks();
-      for (const networkInfo of networks) {
-        if (networkInfo.Name?.startsWith(`${projectName}_`)) {
-          const network = docker.getNetwork(networkInfo.Id);
-          try {
-            await network.remove();
-            console.log(`✅ Removed network: ${networkInfo.Name}`);
-          } catch (networkError: any) {
-            // If network has active endpoints, log warning but don't fail
-            if (networkError.message?.includes('has active endpoints')) {
-              console.warn(`⚠️ Cannot remove network ${networkInfo.Name}: still has active endpoints`);
-            } else {
-              throw networkError;
-            }
+      for (const networkInfo of projectNetworks) {
+        const network = docker.getNetwork(networkInfo.Id);
+        try {
+          await network.remove();
+          console.log(`✅ Removed network: ${networkInfo.Name}`);
+        } catch (networkError: any) {
+          // If network has active endpoints, log warning but don't fail
+          if (networkError.message?.includes('has active endpoints')) {
+            console.warn(`⚠️ Cannot remove network ${networkInfo.Name}: still has active endpoints`);
+          } else {
+            throw networkError;
           }
         }
       }

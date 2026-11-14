@@ -244,7 +244,8 @@ describe('cleanup.ok は後始末の実際の完了と一致する', () => {
     expect(runner.cleanupState()).toBeNull();
   });
 
-  it('後始末が完了しても削除に失敗していれば ok=false（pending なし）', async () => {
+  // 直し回3で期待値を変更：削除に失敗したまま後始末中を解除しない（再レビュー2回目 A(2)。解除は削除を確認できたときだけ）
+  it('後始末が完了しても削除に失敗していれば ok=false・pending=true で、後始末中の状態は解除されない', async () => {
     const f = heldAtClientRun();
     const runner = new DockerLabRunner(f.docker, FAST);
     const e = (await runner.collect(cond).catch((x: unknown) => x)) as LabTimeoutError;
@@ -259,9 +260,11 @@ describe('cleanup.ok は後始末の実際の完了と一致する', () => {
     f.releaseLists();
     const done = await e.cleanupDone!;
     expect(done.ok).toBe(false);
-    expect(done.pending).toBeUndefined();
+    expect(done.pending).toBe(true);
     expect(done.errors.some((m) => m.includes('remove failed'))).toBe(true);
-    // 完了したので後始末中の状態は解除される（失敗内容は応答・ログで確認し、次の reset で片付ける）
-    expect(runner.cleanupState()).toBeNull();
+    expect(done.remaining).toHaveLength(2);
+    // 削除を確認できないので後始末中の状態は解除されず、残りが状態に入る（復旧は API の再起動後の run／reset）
+    expect(runner.cleanupState()?.remaining).toHaveLength(2);
+    expect(await runner.reset().catch((x: unknown) => x)).toBeInstanceOf(LabCleanupPendingError);
   });
 });

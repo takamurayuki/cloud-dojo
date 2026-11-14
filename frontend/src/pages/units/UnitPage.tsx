@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   ApiError,
+  cleanupPendingHint,
   pilotApi,
   type Attempt,
   type EvidenceItem,
@@ -412,6 +413,11 @@ export function UnitPage() {
               <div className="text-sm space-y-1" data-testid="lab-status">
                 <div>状態：{lab.running ? '起動中' : '停止'}</div>
                 {lab.busy && <div className="text-amber-200">使用中：{lab.busy.owner}（{lab.busy.since} から）</div>}
+                {lab.cleanupPending && (
+                  <div className="text-amber-200" data-testid="lab-cleanup-pending">
+                    後始末中：{cleanupPendingHint(lab.cleanupPending)}
+                  </div>
+                )}
                 <div>ネットワーク：{lab.network ? `${lab.network.name}（${lab.network.internal ? 'internal・外部疎通なし' : '外部疎通あり'}）` : 'なし'}</div>
                 <ul>
                   {lab.nodes.map((n) => (

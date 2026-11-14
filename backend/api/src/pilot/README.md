@@ -33,13 +33,27 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   その世代のラベルを持ち、かつ名前がその世代の接頭辞で始まるものだけを対象にする（遅れて走っても別の世代には触れない）。
   後始末は応答の期限（`abortGraceMs`＋`cleanupMs`）を過ぎても、走っていた単位と後始末が実際に終わるまで続く。
   その間は「後始末中」で、run・lab/start・lab/reset は 409 `LAB_CLEANUP_PENDING`（`lab/status` の `cleanupPending` で確認できる）。
-  `cleanup.ok` は期限内に実際に完了し失敗が無いときだけ true で、未完了なら `ok=false`・`pending=true`。
-  Docker が応答を返さないままなら後始末中は解除されない。その場合は API プロセスを再起動する（再起動後の最初の
-  run・lab/reset が、前のプロセスのものを含むラベル付きのラボを全て削除する）。
-- **既存 API との併用**：既存サーバ（`pnpm dev:api`）はパイロットと既存 API を同時に登録する。既存 API のうち
-  `POST /api/network/exec` と `DELETE /api/docker/containers/:id`・`POST /api/docker/containers/:id/stop`・`start` は、
-  対象がラベル `cloud-dojo.lab` を持つコンテナなら 403 `PILOT_LAB_PROTECTED` で拒否する（`lab/protect.ts`。判定はラベルだけで、
-  通常のコンテナは従来どおり）。ログの取得（読み取り）は拒否しない。Docker を直接操作（docker CLI 等）した場合の干渉は防げない。
+  期限超過した操作が reset（collect 冒頭のリセットを含む）を始めていた場合、後始末は reset が一覧した既存のリソース
+  （ID と世代を記録したもの）も削除し直す（このプロセスで reset より後に採番された世代は対象にしない）。最後に、対象にした
+  全リソースが無くなったことを inspect（404）で確かめる。
+  `cleanup.ok` は、対象の削除が全て確認できたときだけ true。期限内に終わらなければ `ok=false`・`pending=true`、
+  終わっても削除を確認できない対象があれば `ok=false`・`pending=true`・`remaining`（残っている対象の一覧）。
+  後始末中の状態は、対象の削除が全て確認できたときだけ解除する（削除失敗・未確認では解除しない。状態の `remaining` に残りが入る）。
+- **後始末中が続く場合**：Docker が応答を返さないまま、または削除を確認できない対象が残ったときは、待っても後始末中
+  （409 `LAB_CLEANUP_PENDING`）が解除されない（画面にもこの案内を表示する）。復旧手順：
+  1. API プロセスを再起動する（`pnpm run dev:pilot` を止めて起動し直す）。後始末中の状態はプロセス内にだけあるので解除される。
+  2. 画面の「ラボで実行（実測）」または `POST /api/pilot/lab/reset` を行う。前のプロセスのものを含むラベル付きのラボが全て削除される。
+  3. それでも残る場合は Docker 自体を確認する（`docker ps -a --filter label=cloud-dojo.lab`、`docker network ls --filter label=cloud-dojo.lab`）。
+- **既存 API との併用**：既存サーバ（`pnpm dev:api`）はパイロットと既存 API を同時に登録する。既存 API のうちコンテナ・
+  ネットワークを実行・停止・削除する経路は、対象がラベル `cloud-dojo.lab` を持てば 403 `PILOT_LAB_PROTECTED` で拒否する
+  （`lab/protect.ts`。判定はラベルだけで、通常のリソースは従来どおり。名前・短縮 ID の指定も inspect で解決してから判定し、
+  以後は確かめた完全な ID で操作する）：
+  - `POST /api/network/exec`、`DELETE /api/docker/containers/:id`、`POST /api/docker/containers/:id/stop`・`start`
+  - `POST /api/network/lab/create`（固定名 `network-node-<i>` の既存コンテナ削除。何も作らないうちに拒否する）
+  - `DELETE /api/network/lab/cleanup`（ラベル `cloud-dojo=network-lab` の一括削除。対象に1つでもあれば何も削除せずに拒否する）
+  - compose（`POST /api/compose/up` の同名コンテナ削除、`/api/compose/down`・`down-volumes` のコンテナ・ネットワーク削除。
+    キューのジョブが失敗として終わる）
+  ログの取得（読み取り）は拒否しない。Docker を直接操作（docker CLI 等）した場合の干渉は防げない。
 
 - Node 22.5 以上が必要（`node:sqlite` を使う）。保存先の既定は `backend/api/.data/pilot.sqlite`（git 管理外）。
 - 既定ポートは既存 API と同じ 4000 なので、既存 API（`pnpm dev:api`）とは同時に起動しない。既存 API を起動した場合も `/api/pilot` に同じ経路が登録される（node:sqlite が無い Node ではパイロット経路だけ無効化し、既存機能は止めない）。

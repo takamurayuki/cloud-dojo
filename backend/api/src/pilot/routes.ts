@@ -67,7 +67,10 @@ function labTimedOut(reply: FastifyReply, e: LabTimeoutError) {
 function labCleanupPending(reply: FastifyReply, state: LabCleanupState) {
   return reply.status(409).send({
     error: 'LAB_CLEANUP_PENDING',
-    message: '前のラボ操作が期限を超え、その後始末がまだ終わっていません。終わってから再試行してください',
+    message:
+      state.remaining && state.remaining.length > 0
+        ? '前のラボ操作が期限を超え、その後始末で削除を確認できなかったリソースが残っています（待っても解除されません）'
+        : '前のラボ操作が期限を超え、その後始末がまだ終わっていません。終わってから再試行してください',
     cleanup: state,
   });
 }

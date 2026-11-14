@@ -1,22 +1,79 @@
 /**
- * 直し回2（必須B）：既存のコンテナ操作 API からパイロットのラボコンテナ（ラベル cloud-dojo.lab）を守る。
- * 対象：POST /api/network/exec、DELETE /api/docker/containers/:id、POST /api/docker/containers/:id/stop・start。
+ * 直し回2（必須B）・直し回3（必須2）：既存のコンテナ・ネットワーク操作 API からパイロットのラボ（ラベル cloud-dojo.lab）を守る。
+ * 対象：POST /api/network/exec、DELETE /api/docker/containers/:id、POST /api/docker/containers/:id/stop・start、
+ * POST /api/network/lab/create（固定名の既存コンテナ削除）、DELETE /api/network/lab/cleanup（一括削除）、compose の down。
  * Docker が無い環境のため dockerode をスタブに差し替える（キューは Redis を使うため差し替える）。
+ * スタブの inspect は実際の Docker と同じく、完全 ID・名前・一意な ID の接頭辞（短縮 ID）で解決する。
  */
 import { PassThrough } from 'node:stream';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const stub = vi.hoisted(() => {
-  const calls = { exec: [] as string[], remove: [] as string[], stop: [] as string[], start: [] as string[] };
-  const containers: Record<string, { Id: string; Name: string; Labels: Record<string, string> }> = {};
-  const find = (idOrName: string) => containers[idOrName] ?? Object.values(containers).find((c) => c.Name === `/${idOrName}`);
+  const calls = {
+    exec: [] as string[],
+    remove: [] as string[],
+    stop: [] as string[],
+    start: [] as string[],
+    removeNetwork: [] as string[],
+    createNetwork: [] as string[],
+    create: [] as string[],
+  };
+  const containers: Record<string, { Id: string; Name: string; Labels: Record<string, string>; State?: string }> = {};
+  const networks: Record<string, { Id: string; Name: string; Labels: Record<string, string> }> = {};
+  const byPrefix = <T extends { Id: string }>(all: T[], key: string) => {
+    const hits = all.filter((x) => x.Id.startsWith(key));
+    return hits.length === 1 ? hits[0] : undefined;
+  };
+  const find = (idOrName: string) =>
+    containers[idOrName] ?? Object.values(containers).find((c) => c.Name === `/${idOrName}`) ?? byPrefix(Object.values(containers), idOrName);
+  const findNet = (idOrName: string) =>
+    networks[idOrName] ?? Object.values(networks).find((n) => n.Name === idOrName) ?? byPrefix(Object.values(networks), idOrName);
+  const matches = (labels: Record<string, string>, filters?: { label?: string[] }) =>
+    (filters?.label ?? []).every((f) => {
+      const [k, v] = f.split('=');
+      return labels[k] === v;
+    });
+  const notFound = (what: string) => Object.assign(new Error(`no such ${what}`), { statusCode: 404 });
   const docker = {
+    ping: async () => 'OK',
+    getImage: () => ({ inspect: async () => ({ Id: 'img' }) }),
+    listContainers: async ({ filters }: { filters?: { label?: string[] } } = {}) =>
+      Object.values(containers)
+        .filter((c) => matches(c.Labels, filters))
+        .map((c) => ({ Id: c.Id, Names: [c.Name], Labels: c.Labels, State: c.State ?? 'running' })),
+    listNetworks: async ({ filters }: { filters?: { label?: string[] } } = {}) =>
+      Object.values(networks)
+        .filter((n) => matches(n.Labels, filters))
+        .map((n) => ({ Id: n.Id, Name: n.Name, Labels: n.Labels })),
+    getNetwork: (idOrName: string) => ({
+      id: idOrName,
+      inspect: async () => {
+        const n = findNet(idOrName);
+        if (!n) throw notFound(`network: ${idOrName}`);
+        return { Id: n.Id, Name: n.Name, Labels: n.Labels };
+      },
+      remove: async () => {
+        calls.removeNetwork.push(idOrName);
+      },
+    }),
+    createNetwork: async (o: { Name: string }) => {
+      calls.createNetwork.push(o.Name);
+      return { id: `net-${o.Name}` };
+    },
+    createContainer: async (spec: { name: string }) => {
+      calls.create.push(spec.name);
+      return {
+        id: `new-${spec.name}`,
+        start: async () => undefined,
+        inspect: async () => ({ NetworkSettings: { Networks: {} } }),
+      };
+    },
     getContainer: (idOrName: string) => ({
       inspect: async () => {
         const c = find(idOrName);
-        if (!c) throw Object.assign(new Error(`no such container: ${idOrName}`), { statusCode: 404 });
-        return { Id: c.Id, Name: c.Name, Config: { Labels: c.Labels } };
+        if (!c) throw notFound(`container: ${idOrName}`);
+        return { Id: c.Id, Name: c.Name, Config: { Labels: c.Labels }, State: { Running: (c.State ?? 'running') === 'running' } };
       },
       exec: async () => {
         calls.exec.push(idOrName);
@@ -40,7 +97,7 @@ const stub = vi.hoisted(() => {
       },
     }),
   };
-  return { calls, containers, docker };
+  return { calls, containers, networks, docker };
 });
 
 vi.mock('dockerode', () => ({
@@ -57,6 +114,7 @@ let app: FastifyInstance;
 beforeEach(async () => {
   for (const k of Object.keys(stub.calls) as (keyof typeof stub.calls)[]) stub.calls[k].length = 0;
   for (const k of Object.keys(stub.containers)) delete stub.containers[k];
+  for (const k of Object.keys(stub.networks)) delete stub.networks[k];
   stub.containers['labc0ffee0001'] = {
     Id: 'labc0ffee0001',
     Name: '/cloud-dojo-lab-n5-tcp-abcg1-client',
@@ -114,5 +172,130 @@ describe('既存 API からのパイロットのラボコンテナへの操作�
   it('存在しないコンテナは従来どおりのエラー（500）で、403 にはならない', async () => {
     const r = await app.inject({ method: 'DELETE', url: '/api/docker/containers/nope' });
     expect(r.statusCode).toBe(500);
+  });
+});
+
+/** 両方のラベル（既存のネットワークラボ cloud-dojo=network-lab とパイロットの cloud-dojo.lab）を併せ持つコンテナ */
+function addDualLabelled(id = 'dual0000000001', name = '/network-node-1') {
+  stub.containers[id] = { Id: id, Name: name, Labels: { 'cloud-dojo': 'network-lab', 'cloud-dojo.lab': 'n5-tcp', 'cloud-dojo.gen': 'abcg1' } };
+}
+
+describe('直し回3：既存 network API の削除経路（一括 cleanup・固定名削除）もラベルで拒否する', () => {
+  it('DELETE /api/network/lab/cleanup：両ラベルを併せ持つコンテナがあれば 403 で、通常のコンテナも含め何も削除しない', async () => {
+    addDualLabelled();
+    stub.networks['labnet0001'] = { Id: 'labnet0001', Name: 'lab-network', Labels: { 'cloud-dojo': 'network-lab' } };
+    const r = await app.inject({ method: 'DELETE', url: '/api/network/lab/cleanup' });
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe('PILOT_LAB_PROTECTED');
+    expect(stub.calls.remove).toHaveLength(0);
+    expect(stub.calls.removeNetwork).toHaveLength(0);
+  });
+
+  it('DELETE /api/network/lab/cleanup：両ラベルを併せ持つネットワークがあれば 403 で、何も削除しない', async () => {
+    stub.networks['dualnet0001'] = { Id: 'dualnet0001', Name: 'lab-network', Labels: { 'cloud-dojo': 'network-lab', 'cloud-dojo.lab': 'n5-tcp' } };
+    const r = await app.inject({ method: 'DELETE', url: '/api/network/lab/cleanup' });
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe('PILOT_LAB_PROTECTED');
+    expect(stub.calls.remove).toHaveLength(0);
+    expect(stub.calls.removeNetwork).toHaveLength(0);
+  });
+
+  it('DELETE /api/network/lab/cleanup：パイロットのラベルが無ければ従来どおり network-lab のものだけ削除する', async () => {
+    stub.networks['labnet0001'] = { Id: 'labnet0001', Name: 'lab-network', Labels: { 'cloud-dojo': 'network-lab' } };
+    const r = await app.inject({ method: 'DELETE', url: '/api/network/lab/cleanup' });
+    expect(r.statusCode).toBe(200);
+    // ラボコンテナ labc0ffee0001 は network-lab ラベルを持たないので対象外。plain0000001 だけ削除する
+    expect(stub.calls.remove).toEqual(['plain0000001']);
+    expect(stub.calls.removeNetwork).toEqual(['labnet0001']);
+  });
+
+  it('POST /api/network/lab/create：固定名 network-node-<i> が両ラベルを併せ持つコンテナなら 403 で、何も作成・削除しない', async () => {
+    addDualLabelled('dual0000000002', '/network-node-2');
+    const r = await app.inject({ method: 'POST', url: '/api/network/lab/create', payload: { nodeCount: 3 } });
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe('PILOT_LAB_PROTECTED');
+    expect(stub.calls.remove).toHaveLength(0);
+    expect(stub.calls.createNetwork).toHaveLength(0);
+    expect(stub.calls.create).toHaveLength(0);
+  });
+
+  it('POST /api/network/lab/create：パイロットのラベルが無い同名コンテナは従来どおり（確かめた ID で）削除して作り直す', async () => {
+    stub.containers['oldnode00001'] = { Id: 'oldnode00001', Name: '/network-node-1', Labels: { 'cloud-dojo': 'network-lab' } };
+    const r = await app.inject({ method: 'POST', url: '/api/network/lab/create', payload: { nodeCount: 2 } });
+    expect(r.statusCode).toBe(200);
+    expect(stub.calls.remove).toEqual(['oldnode00001']);
+    expect(stub.calls.create).toEqual(['network-node-1', 'network-node-2']);
+  });
+});
+
+describe('直し回3：短縮 ID・名前での指定でもラボを保護する', () => {
+  it('exec・削除・停止・起動：短縮 ID と名前のどちらでも 403、操作は呼ばれない', async () => {
+    const targets = ['labc0ff', 'labc0ffee', 'cloud-dojo-lab-n5-tcp-abcg1-client'];
+    for (const t of targets) {
+      const reqs = [
+        { method: 'POST' as const, url: '/api/network/exec', payload: { containerId: t, command: 'true' } },
+        { method: 'DELETE' as const, url: `/api/docker/containers/${t}?force=true` },
+        { method: 'POST' as const, url: `/api/docker/containers/${t}/stop` },
+        { method: 'POST' as const, url: `/api/docker/containers/${t}/start` },
+      ];
+      for (const q of reqs) {
+        const r = await app.inject(q);
+        expect(r.statusCode, `${q.method} ${q.url}`).toBe(403);
+        expect(r.json().error).toBe('PILOT_LAB_PROTECTED');
+      }
+    }
+    expect(stub.calls).toMatchObject({ exec: [], remove: [], stop: [], start: [] });
+  });
+
+  it('通常のコンテナは短縮 ID でも従来どおりで、操作は確かめた完全な ID に対して行う', async () => {
+    expect((await app.inject({ method: 'POST', url: '/api/docker/containers/plain00/stop' })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: '/api/network/exec', payload: { containerId: 'plain00', command: 'hostname' } })).statusCode).toBe(200);
+    expect(stub.calls.stop).toEqual(['plain0000001']);
+    expect(stub.calls.exec).toEqual(['plain0000001']);
+  });
+
+  it('一括 cleanup・固定名削除：両ラベルのコンテナは、名前で選ばれても ID で選ばれても拒否する（名前の付け替え後も ID で判定）', async () => {
+    // 固定名 network-node-1 がラボコンテナに付いている（名前の再割当を想定）
+    addDualLabelled('dual0000000003', '/network-node-1');
+    expect((await app.inject({ method: 'POST', url: '/api/network/lab/create', payload: { nodeCount: 2 } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'DELETE', url: '/api/network/lab/cleanup' })).statusCode).toBe(403);
+    expect(stub.calls.remove).toHaveLength(0);
+  });
+});
+
+describe('直し回3：compose の削除経路もラベルで拒否する', () => {
+  it('compose down：プロジェクト名の接頭辞に当たるコンテナがパイロットのラベルを持てば、何も停止・削除せずに失敗する', async () => {
+    const { composeService } = await import('../services/compose');
+    stub.containers['dual0000000004'] = { Id: 'dual0000000004', Name: '/proj_web', Labels: { 'cloud-dojo.lab': 'n5-tcp' } };
+    stub.containers['plainproj0001'] = { Id: 'plainproj0001', Name: '/proj_db', Labels: {} };
+    const silence = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await expect(composeService.composeDown('proj')).rejects.toThrow(/パイロットのラボ/);
+    silence.mockRestore();
+    expect(stub.calls.stop).toHaveLength(0);
+    expect(stub.calls.remove).toHaveLength(0);
+    expect(stub.calls.removeNetwork).toHaveLength(0);
+  });
+
+  it('compose down：パイロットのラベルを持つネットワークがあれば失敗し、何も削除しない', async () => {
+    const { composeService } = await import('../services/compose');
+    stub.containers['plainproj0001'] = { Id: 'plainproj0001', Name: '/proj_db', Labels: {} };
+    stub.networks['dualnet0002'] = { Id: 'dualnet0002', Name: 'proj_default', Labels: { 'cloud-dojo.lab': 'n5-tcp' } };
+    const silence = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await expect(composeService.composeDown('proj')).rejects.toThrow(/パイロットのラボ/);
+    silence.mockRestore();
+    expect(stub.calls.remove).toHaveLength(0);
+    expect(stub.calls.removeNetwork).toHaveLength(0);
+  });
+
+  it('compose down：パイロットのラベルが無ければ従来どおり停止・削除する', async () => {
+    const { composeService } = await import('../services/compose');
+    stub.containers['plainproj0001'] = { Id: 'plainproj0001', Name: '/proj_db', Labels: {} };
+    stub.networks['projnet0001'] = { Id: 'projnet0001', Name: 'proj_default', Labels: {} };
+    const silence = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await composeService.composeDown('proj');
+    silence.mockRestore();
+    expect(stub.calls.stop).toEqual(['plainproj0001']);
+    expect(stub.calls.remove).toEqual(['plainproj0001']);
+    expect(stub.calls.removeNetwork).toEqual(['projnet0001']);
   });
 });

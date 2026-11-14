@@ -9,8 +9,11 @@
  *   - 操作（start／reset／collect）ごとの全体期限と、その中の各単位（ping・ビルド・起動・リセット・exec）の期限。
  *     単位の期限は「単位の上限」と「全体の残り時間」の短い方。
  *   - exec の出力とビルド進捗の取得量。
- *   - 期限を超えたら、走っている単位の終了を短い猶予だけ待ってから、ラベル付きコンテナの停止・削除と
- *     ネットワークの削除を行い、後始末の成否を LabTimeoutError.cleanup に入れて投げる。
+ *   - 期限を超えたら、走っている単位の終了を短い猶予だけ待ってから、その操作の世代のコンテナの停止・削除と
+ *     ネットワークの削除を行い、後始末の成否を LabTimeoutError.cleanup に入れて投げる。reset（collect 冒頭の
+ *     リセットを含む）が片付け対象として一覧した既存のリソース（ID と世代）も、後始末で削除し直す。
+ *   - 後始末の最後に、対象にした全リソースが実際に無くなったかを inspect で確かめる。残っている・確かめられない
+ *     ものがあれば ok=false（remaining に列挙）とし、「後始末中」の状態を解除しない（成功と誤報しない）。
  * - Docker が無い環境では LabUnavailableError（code=DOCKER_NOT_FOUND）を投げる。呼び出し側は明示エラーで返す。
  * - 排他制御（ラボ操作の直列化）は呼び出し側（routes.ts、lock.ts）が行う。
  *
@@ -41,6 +44,13 @@ let generationSeq = 0;
 export function nextGeneration(): string {
   generationSeq += 1;
   return `${PROCESS_TOKEN}g${generationSeq}`;
+}
+/** このプロセスが gen より後に採番した世代か（reset の対象を、reset より後の世代へ広げないための判定） */
+function isLaterGeneration(candidate: string | undefined, gen: string): boolean {
+  if (!candidate) return false;
+  const m = /^([0-9a-f]+)g(\d+)$/.exec(candidate);
+  const own = /^([0-9a-f]+)g(\d+)$/.exec(gen);
+  return Boolean(m && own && m[1] === own[1] && Number(m[2]) > Number(own[2]));
 }
 const networkName = (gen: string) => `${NAME_PREFIX}-${gen}`;
 const containerName = (gen: string, role: string) => `${NAME_PREFIX}-${gen}-${role}`;
@@ -115,8 +125,13 @@ export interface CleanupResult {
   removedContainers: number;
   removedNetworks: number;
   errors: string[];
-  /** 期限内に完了せず、まだ続いている（完了するまで新しいラボ操作は 409）。完了していれば付かない */
+  /**
+   * 「後始末中」の状態が解除されていない（新しいラボ操作は 409）。期限内に完了していない場合と、完了したが
+   * 対象の削除を確認できなかった場合（remaining あり）に付く。削除が全て確認できていれば付かない
+   */
   pending?: true;
+  /** 削除を確認できなかった（残っている、または確かめられなかった）対象。全て確認できていれば付かない */
+  remaining?: string[];
 }
 
 /** 期限超過の後始末が続いている間の状態 */
@@ -124,6 +139,11 @@ export interface LabCleanupState {
   generation: string;
   operation: string;
   since: string;
+  /**
+   * 後始末は終わったが、削除を確認できなかった対象（付いているときは待っても解除されない。API プロセスを
+   * 再起動したあと run／lab/reset で片付ける。README「後始末中が続く場合」）
+   */
+  remaining?: string[];
 }
 
 export class LabCleanupPendingError extends Error {
@@ -252,10 +272,20 @@ export function consumeBuildStream(stream: NodeJS.ReadableStream, maxBytes: numb
  * 1つのラボ操作の時間予算。各単位は min(単位の上限, 全体の残り) で打ち切る。
  * 期限を超えたら aborted になり、以降の単位は始めない（走っていた単位は inflight に残る）。
  */
+/** reset が片付け対象として一覧したリソース（期限超過の後始末で削除し直し、削除を確かめる） */
+interface ResetTargets {
+  containers: Array<{ id: string; gen: string | null }>;
+  networks: Array<{ id: string; name: string; gen: string | null }>;
+}
+
 class OpBudget {
   private readonly endAt: number;
   aborted = false;
   inflight: Promise<unknown> | null = null;
+  /** この操作が reset（doReset）を始めたか */
+  resetRequested = false;
+  /** reset が一覧した片付け対象（一覧が返る前なら null） */
+  resetTargets: ResetTargets | null = null;
 
   constructor(
     readonly operation: string,
@@ -305,6 +335,11 @@ class OpBudget {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const emptyCleanup = (): CleanupResult => ({ ok: false, stoppedContainers: 0, removedContainers: 0, removedNetworks: 0, errors: [] });
+const statusOf = (e: unknown) => (e as { statusCode?: number }).statusCode;
+
+/** 後始末で対象にしたリソース（最後に削除を確かめる）。キーは種類と完全 ID */
+type Tracked = Map<string, { kind: 'container' | 'network'; id: string; label: string }>;
+const track = (t: Tracked | undefined, kind: 'container' | 'network', id: string, label: string) => t?.set(`${kind}:${id}`, { kind, id, label });
 
 const SERVER_APPLY: Record<string, string> = {
   open: 'nohup python3 /lab/server.py >/tmp/server.log 2>&1 & sleep 0.5',
@@ -348,8 +383,14 @@ export class DockerLabRunner implements LabRunner {
         const r = emptyCleanup();
         const state: LabCleanupState = { generation: b.generation, operation, since: new Date().toISOString() };
         this.settling = state;
-        const done = this.settleTimedOut(b, r).finally(() => {
-          if (this.settling === state) this.settling = null;
+        // 解除は、対象の削除が全て確認できたとき（r.ok）だけ。確認できなければ残りを状態に記録して保持する
+        const done = this.settleTimedOut(b, r).then((res) => {
+          if (this.settling === state) {
+            if (res.ok) this.settling = null;
+            else this.settling = { ...state, remaining: res.remaining ?? [...res.errors] };
+          }
+          if (!res.ok) res.pending = true;
+          return res;
         });
         const answered = await Promise.race([done, sleep(this.limits.abortGraceMs + this.limits.cleanupMs).then(() => null)]);
         e.cleanup = answered ?? {
@@ -369,8 +410,12 @@ export class DockerLabRunner implements LabRunner {
    * 1. 走っていた単位の終了を猶予だけ待つ。2. その世代のリソースを停止・削除する。
    * 3. 走っていた単位の実際の終了を待つ（期限なし）。4. 1 の時点で単位が終わっていなかったなら、
    *    その後に作られた可能性があるため、同じ世代のリソースをもう一度片付ける。
+   * 5. 操作が reset を始めていたら、reset が一覧した既存のリソース（ID と世代を記録したもの）を削除する。
+   *    一覧が返らないまま終わった場合は、対象を確定できないので失敗として記録する（対象は広げない）。
+   * 6. 対象にした全リソースが無くなったことを inspect で確かめる。残り・未確認は remaining に入れ、ok=false。
    */
   private async settleTimedOut(b: OpBudget, r: CleanupResult): Promise<CleanupResult> {
+    const tracked: Tracked = new Map();
     let inflightDone = !b.inflight;
     const inflight = b.inflight
       ? b.inflight.then(
@@ -382,11 +427,79 @@ export class DockerLabRunner implements LabRunner {
       : Promise.resolve();
     await Promise.race([inflight, sleep(this.limits.abortGraceMs)]);
     const settledBeforeFirstPass = inflightDone;
-    await this.cleanupGeneration(b.generation, r);
+    await this.cleanupGeneration(b.generation, r, tracked);
     await inflight;
-    if (!settledBeforeFirstPass) await this.cleanupGeneration(b.generation, r);
-    r.ok = r.errors.length === 0;
+    if (!settledBeforeFirstPass) await this.cleanupGeneration(b.generation, r, tracked);
+    if (b.resetRequested) {
+      if (b.resetTargets) await this.removeResetTargets(b.resetTargets, r, tracked);
+      else r.errors.push('reset の片付け対象（既存のラボ）を一覧する前に打ち切られたため、既存のラボを削除できたか確認できない');
+    }
+    const remaining = await this.confirmRemoved(tracked);
+    if (remaining.length > 0) r.remaining = remaining;
+    r.ok = r.errors.length === 0 && remaining.length === 0;
     return r;
+  }
+
+  /**
+   * reset が一覧した既存のリソースを、記録した ID で削除する。削除の前に inspect し、ラボのラベルと
+   * 記録した世代が一致するものだけを対象にする（既に無いものは成功）。
+   */
+  private async removeResetTargets(t: ResetTargets, r: CleanupResult, tracked: Tracked) {
+    for (const c of t.containers) {
+      const label = `container ${c.id.slice(0, 12)}（reset 対象、世代 ${c.gen ?? '-'}）`;
+      try {
+        const info = await this.docker.getContainer(c.id).inspect();
+        const labels = info.Config?.Labels ?? {};
+        if (labels[LABEL_LAB] !== LAB_ID || (labels[LABEL_GEN] ?? null) !== c.gen) continue; // 記録した対象ではない
+      } catch (e) {
+        if (statusOf(e) === 404) continue; // 既に無い
+        r.errors.push(`inspect ${label}: ${(e as Error).message}`);
+        track(tracked, 'container', c.id, label);
+        continue;
+      }
+      track(tracked, 'container', c.id, label);
+      try {
+        await this.docker.getContainer(c.id).remove({ force: true });
+        r.removedContainers++;
+      } catch (e) {
+        if (statusOf(e) !== 404) r.errors.push(`remove ${label}: ${(e as Error).message}`);
+      }
+    }
+    for (const n of t.networks) {
+      const label = `network ${n.name}（reset 対象、世代 ${n.gen ?? '-'}）`;
+      try {
+        const info = (await this.docker.getNetwork(n.id).inspect()) as { Labels?: Record<string, string> };
+        const labels = info.Labels ?? {};
+        if (labels[LABEL_LAB] !== LAB_ID || (labels[LABEL_GEN] ?? null) !== n.gen) continue;
+      } catch (e) {
+        if (statusOf(e) === 404) continue;
+        r.errors.push(`inspect ${label}: ${(e as Error).message}`);
+        track(tracked, 'network', n.id, label);
+        continue;
+      }
+      track(tracked, 'network', n.id, label);
+      try {
+        await this.docker.getNetwork(n.id).remove();
+        r.removedNetworks++;
+      } catch (e) {
+        if (statusOf(e) !== 404) r.errors.push(`remove ${label}: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  /** 対象にした各リソースを inspect し、404（無い）にならないもの（残っている・確かめられない）を返す */
+  private async confirmRemoved(tracked: Tracked): Promise<string[]> {
+    const left: string[] = [];
+    for (const t of tracked.values()) {
+      try {
+        if (t.kind === 'container') await this.docker.getContainer(t.id).inspect();
+        else await this.docker.getNetwork(t.id).inspect();
+        left.push(`${t.label}：残っている`);
+      } catch (e) {
+        if (statusOf(e) !== 404) left.push(`${t.label}：削除を確認できない（${(e as Error).message}）`);
+      }
+    }
+    return left;
   }
 
   /**
@@ -394,7 +507,7 @@ export class DockerLabRunner implements LabRunner {
    * 一覧は世代ラベルで絞り込み、さらに各要素のラベルと名前の接頭辞を確かめる（一覧が他の世代を含んでも触れない）。
    * ネットワークの一覧は、コンテナの処理が終わってから取得するが、同じ検査を通すので別世代のものは対象にならない。
    */
-  async cleanupGeneration(gen: string, r: CleanupResult = emptyCleanup()): Promise<CleanupResult> {
+  async cleanupGeneration(gen: string, r: CleanupResult = emptyCleanup(), tracked?: Tracked): Promise<CleanupResult> {
     const filters = { label: [`${LABEL_LAB}=${LAB_ID}`, `${LABEL_GEN}=${gen}`] };
     const cPrefix = `/${containerName(gen, '')}`;
     try {
@@ -402,6 +515,7 @@ export class DockerLabRunner implements LabRunner {
         (c) => c.Labels?.[LABEL_LAB] === LAB_ID && c.Labels?.[LABEL_GEN] === gen && (c.Names ?? []).some((n) => n.startsWith(cPrefix)),
       );
       for (const c of containers) {
+        track(tracked, 'container', c.Id, `container ${c.Id.slice(0, 12)}（世代 ${gen}）`);
         const handle = this.docker.getContainer(c.Id);
         try {
           if (c.State === 'running') {
@@ -429,6 +543,7 @@ export class DockerLabRunner implements LabRunner {
         (n) => n.Labels?.[LABEL_LAB] === LAB_ID && n.Labels?.[LABEL_GEN] === gen && n.Name === networkName(gen),
       );
       for (const n of networks) {
+        track(tracked, 'network', n.Id, `network ${n.Name}（世代 ${gen}）`);
         try {
           await this.docker.getNetwork(n.Id).remove();
           r.removedNetworks++;
@@ -592,15 +707,26 @@ export class DockerLabRunner implements LabRunner {
     return b.step('status', this.limits.startMs, () => this.readStatus());
   }
 
+  /**
+   * ラベル付きのラボ全体を削除する。片付け対象（コンテナ・ネットワークの ID と世代）は、削除を始める前に
+   * まとめて一覧して b.resetTargets に記録する（期限超過したら後始末がこの記録で削除し直し、削除を確かめる）。
+   * このプロセスで reset より後に採番された世代のものは対象にしない。
+   */
   private async doReset(b: OpBudget) {
+    b.resetRequested = true;
     await this.ensureDocker(b);
     return b.step('reset', this.limits.resetMs, async () => {
-      const containers = await this.labContainers();
+      const notLater = (labels: Record<string, string> | undefined) => !isLaterGeneration(labels?.[LABEL_GEN], b.generation);
+      const containers = (await this.labContainers()).filter((c) => c.Labels?.[LABEL_LAB] === LAB_ID && notLater(c.Labels));
+      const networks = (await this.labNetworks()).filter((n) => n.Labels?.[LABEL_LAB] === LAB_ID && notLater(n.Labels));
+      b.resetTargets = {
+        containers: containers.map((c) => ({ id: c.Id, gen: c.Labels?.[LABEL_GEN] ?? null })),
+        networks: networks.map((n) => ({ id: n.Id, name: n.Name, gen: n.Labels?.[LABEL_GEN] ?? null })),
+      };
       for (const c of containers) {
         b.check();
         await this.docker.getContainer(c.Id).remove({ force: true });
       }
-      const networks = await this.labNetworks();
       for (const n of networks) {
         b.check();
         await this.docker.getNetwork(n.Id).remove();

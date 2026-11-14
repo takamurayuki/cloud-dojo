@@ -155,6 +155,11 @@ export function fakeDocker(opts: FakeOpts = {}) {
     },
     getContainer: (id: string) => handle(id),
     getNetwork: (id: string) => ({
+      inspect: async () => {
+        const n = networks.get(id);
+        if (!n) throw Object.assign(new Error(`no such network: ${id}`), { statusCode: 404 });
+        return { Id: n.Id, Name: n.Name, Labels: n.Labels };
+      },
       remove: async () => {
         calls.removeNetwork.push(id);
         networks.delete(id);

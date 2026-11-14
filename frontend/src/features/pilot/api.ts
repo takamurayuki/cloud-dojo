@@ -111,7 +111,30 @@ export interface LabStatus {
   /** ラボを使用中の操作（なければ null） */
   busy?: { owner: string; since: string } | null;
   /** 期限超過した操作の後始末が続いている間の状態（無ければ null） */
-  cleanupPending?: { generation: string; operation: string; since: string } | null;
+  cleanupPending?: LabCleanupState | null;
+}
+
+/** 期限超過した操作の後始末中の状態（API の LabCleanupState） */
+export interface LabCleanupState {
+  generation: string;
+  operation: string;
+  since: string;
+  /** 後始末は終わったが削除を確認できなかった対象（付いているときは待っても解除されない） */
+  remaining?: string[];
+}
+
+/** 後始末中が続く場合の復旧手順（README への導線） */
+export const LAB_CLEANUP_RECOVERY =
+  '復旧手順：API プロセスを再起動し（pnpm run dev:pilot を止めて起動し直す）、そのあと「リセット」または「ラボで実行（実測）」を押すと、ラベル付きのラボが全て片付きます（詳細は backend/api/src/pilot/README.md の「後始末中が続く場合」）。';
+
+/** 後始末中（LAB_CLEANUP_PENDING）の表示用の文 */
+export function cleanupPendingHint(s: LabCleanupState | null | undefined): string {
+  const since = s ? new Date(s.since) : null;
+  const op = s ? `前の操作（${s.operation}、${since && !Number.isNaN(since.getTime()) ? since.toLocaleString('ja-JP') : s.since} 開始）` : '前の操作';
+  if (s?.remaining && s.remaining.length > 0) {
+    return `${op}の後始末で、削除を確認できなかったリソースがあります（${s.remaining.join(' / ')}）。待っても解除されません。${LAB_CLEANUP_RECOVERY}`;
+  }
+  return `${op}の後始末が続いています。通常は終わりしだい解除されるので、しばらく待ってから再試行してください。長く続く場合の${LAB_CLEANUP_RECOVERY}`;
 }
 
 export class ApiError extends Error {
@@ -137,7 +160,11 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     throw new ApiError(0, 'API_UNREACHABLE', `API に接続できません（${BASE}）`);
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(res.status, data.error ?? 'ERROR', data.message ?? data.error ?? res.statusText, data.hint ?? cleanupHint(data.cleanup));
+  if (!res.ok) {
+    // 409 LAB_CLEANUP_PENDING の cleanup は後始末中の状態（LabCleanupState）、504 LAB_TIMEOUT の cleanup は後始末の結果
+    const hint = data.hint ?? (data.error === 'LAB_CLEANUP_PENDING' ? cleanupPendingHint(data.cleanup) : cleanupHint(data.cleanup));
+    throw new ApiError(res.status, data.error ?? 'ERROR', data.message ?? data.error ?? res.statusText, hint);
+  }
   return data as T;
 }
 
@@ -147,16 +174,22 @@ interface CleanupResult {
   removedContainers: number;
   removedNetworks: number;
   errors: string[];
-  /** 後始末が期限内に終わらず続いている（終わるまでラボ操作は 409 LAB_CLEANUP_PENDING） */
+  /** 後始末中の状態が解除されていない（期限内に終わっていない、または削除を確認できなかった。ラボ操作は 409 LAB_CLEANUP_PENDING） */
   pending?: true;
+  /** 削除を確認できなかった対象 */
+  remaining?: string[];
 }
 
 /** ラボ操作の期限超過（LAB_TIMEOUT）時に行われた後始末の結果を表示用の文にする */
 function cleanupHint(c: CleanupResult | null | undefined): string | undefined {
   if (!c) return undefined;
   const counts = `停止 ${c.stoppedContainers}・削除 ${c.removedContainers} コンテナ、ネットワーク削除 ${c.removedNetworks}`;
-  if (c.pending) return `ラボの後始末が期限内に終わらず、まだ続いています（ここまで：${counts}）。終わるまでラボの操作はできません。しばらく待ってから再試行してください。`;
-  return c.ok ? `ラボのコンテナを停止・削除しました（${counts}）。` : `ラボの後始末に失敗した箇所があります（${counts}）：${c.errors.join(' / ')}`;
+  const errors = c.errors ?? [];
+  if (c.remaining && c.remaining.length > 0) {
+    return `ラボの後始末で、削除を確認できなかったリソースがあります（${counts}）：${[...c.remaining, ...errors].join(' / ')}。待っても解除されず、このままではラボを操作できません。${LAB_CLEANUP_RECOVERY}`;
+  }
+  if (c.pending) return `ラボの後始末が期限内に終わらず、まだ続いています（ここまで：${counts}）。終わるまでラボの操作はできません。しばらく待ってから再試行してください。長く続く場合の${LAB_CLEANUP_RECOVERY}`;
+  return c.ok ? `ラボのコンテナを停止・削除しました（${counts}）。` : `ラボの後始末に失敗した箇所があります（${counts}）：${errors.join(' / ')}`;
 }
 
 export const pilotApi = {
