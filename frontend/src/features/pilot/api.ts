@@ -6,7 +6,14 @@ import { API_BASE_URL } from '@/config/constants';
 
 const BASE = `${API_BASE_URL}/api/pilot`;
 
-export type EvidenceKind = 'tcpdump' | 'ss-client' | 'ss-server' | 'curl';
+export type EvidenceKind = 'tcpdump' | 'ss-client' | 'ss-server' | 'curl' | 'lab-env';
+
+export interface LabEnv {
+  linearTimeouts: number;
+  linearTimeoutsRecorded: boolean;
+  synRetries: number;
+  osRelease: string | null;
+}
 
 export interface UnitLayer {
   title: string;
@@ -47,6 +54,10 @@ export interface Evaluation {
   synTimes: number[];
   evidenceOrigin: 'measured' | 'fixture' | 'mixed' | 'none';
   evidenceConsistent: boolean;
+  consistencyIssues: string[];
+  labEnv: LabEnv | null;
+  labEnvPremise: { linearTimeouts: number; synRetries: number };
+  expectedSynTimes: number[] | null;
   missing: string[];
   evidenceEligible: boolean;
   blockers: string[];
@@ -68,6 +79,7 @@ export interface Attempt {
   predictionLocked: boolean;
   predictionLockedAt: string | null;
   prediction: Record<string, string> | null;
+  running: boolean;
   evidence: { kind: EvidenceKind; origin: 'measured' | 'fixture'; sha256: string; collectedAt: string }[];
   evaluation: Evaluation | null;
   reflection: Reflection | null;
@@ -96,6 +108,8 @@ export interface LabStatus {
   running: boolean;
   nodes: { role: string; containerId: string; state: string }[];
   network: { name: string; internal: boolean } | null;
+  /** ラボを使用中の操作（なければ null） */
+  busy?: { owner: string; since: string } | null;
 }
 
 export class ApiError extends Error {
@@ -121,8 +135,23 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     throw new ApiError(0, 'API_UNREACHABLE', `API に接続できません（${BASE}）`);
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(res.status, data.error ?? 'ERROR', data.message ?? data.error ?? res.statusText, data.hint);
+  if (!res.ok) throw new ApiError(res.status, data.error ?? 'ERROR', data.message ?? data.error ?? res.statusText, data.hint ?? cleanupHint(data.cleanup));
   return data as T;
+}
+
+interface CleanupResult {
+  ok: boolean;
+  stoppedContainers: number;
+  removedContainers: number;
+  removedNetworks: number;
+  errors: string[];
+}
+
+/** ラボ操作の期限超過（LAB_TIMEOUT）時に行われた後始末の結果を表示用の文にする */
+function cleanupHint(c: CleanupResult | null | undefined): string | undefined {
+  if (!c) return undefined;
+  const counts = `停止 ${c.stoppedContainers}・削除 ${c.removedContainers} コンテナ、ネットワーク削除 ${c.removedNetworks}`;
+  return c.ok ? `ラボのコンテナを停止・削除しました（${counts}）。` : `ラボの後始末に失敗した箇所があります（${counts}）：${c.errors.join(' / ')}`;
 }
 
 export const pilotApi = {

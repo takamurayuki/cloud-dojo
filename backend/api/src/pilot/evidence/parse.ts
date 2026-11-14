@@ -142,19 +142,146 @@ export function observe(evidence: Partial<Record<EvidenceKind, string>>, connect
   return { observed, missing, synTimes, curl };
 }
 
+// ---------------------------------------------------------------------------
+// SYN 再送の前提（ラボの client の実行環境）
+//
+// Linux の SYN 再送間隔は sysctl で変わる：
+//   - net.ipv4.tcp_syn_linear_timeouts（L）：最初の L 回の再送は初期RTO（1秒）間隔のまま（線形）。
+//     その後は初期RTO×2^0, 2^1, … と倍々になる。既定値 4 の場合、間隔は 1,1,1,1,1,2,4…秒。
+//     この sysctl が無い（導入前の）カーネルは L=0 と同じ倍々のみの挙動。
+//   - net.ipv4.tcp_syn_retries（R）：再送の上限回数（既定 6）。
+// ラボは client コンテナで L=0・R=6 を明示設定し（runner.ts の CLIENT_SYSCTLS）、実際の値を証拠
+// 「lab-env」として記録する。整合判定は記録された値から導いた期待スケジュールと実測を照合する。
+// ---------------------------------------------------------------------------
+
+/** Linux の初期再送タイムアウト（TCP_TIMEOUT_INIT、秒）。カーネル定数 */
+export const INITIAL_RTO_SEC = 1;
+
+export interface SynEnv {
+  /** net.ipv4.tcp_syn_linear_timeouts の実効値 */
+  linearTimeouts: number;
+  /** sysctl が存在して値を読めたか（false＝導入前のカーネルで、実効値は 0） */
+  linearTimeoutsRecorded: boolean;
+  /** net.ipv4.tcp_syn_retries */
+  synRetries: number;
+  /** uname -r（記録のみ。判定には使わない） */
+  osRelease: string | null;
+}
+
+/** 教材本文・反事実・フィクスチャが前提とする環境（ラボが client に設定する値） */
+export const LAB_SYN_PREMISE = { linearTimeouts: 0, synRetries: 6 } as const;
+
+export const PREMISE_ENV: SynEnv = { ...LAB_SYN_PREMISE, linearTimeoutsRecorded: true, osRelease: null };
+
+/** 証拠「lab-env」（client-run.sh が出力する key=value 行）を解析する */
+export function parseLabEnv(text: string): { env: SynEnv | null; problems: string[] } {
+  const kv = new Map<string, string>();
+  for (const line of text.split('\n')) {
+    const m = /^\s*([a-z0-9_.]+)\s*=\s*(.*?)\s*$/.exec(line);
+    if (m) kv.set(m[1], m[2]);
+  }
+  const problems: string[] = [];
+  const lin = kv.get('net.ipv4.tcp_syn_linear_timeouts');
+  const ret = kv.get('net.ipv4.tcp_syn_retries');
+  let linearTimeouts = 0;
+  let linearTimeoutsRecorded = false;
+  if (lin === undefined) problems.push('lab-env: net.ipv4.tcp_syn_linear_timeouts の記録が無い');
+  else if (lin === 'absent') linearTimeoutsRecorded = false;
+  else if (/^\d+$/.test(lin)) {
+    linearTimeouts = Number(lin);
+    linearTimeoutsRecorded = true;
+  } else problems.push(`lab-env: net.ipv4.tcp_syn_linear_timeouts の値を解析できない（${lin}）`);
+  let synRetries = 0;
+  if (ret === undefined || !/^\d+$/.test(ret)) problems.push(`lab-env: net.ipv4.tcp_syn_retries を解析できない（${ret ?? '記録なし'}）`);
+  else synRetries = Number(ret);
+  if (problems.length) return { env: null, problems };
+  return { env: { linearTimeouts, linearTimeoutsRecorded, synRetries, osRelease: kv.get('kernel.osrelease') ?? null }, problems };
+}
+
+/** 設定値から SYN の送信時刻（最初の SYN を 0 秒とする、再送上限まで全て）を導く */
+export function synSchedule(env: Pick<SynEnv, 'linearTimeouts' | 'synRetries'>): number[] {
+  const times = [0];
+  let t = 0;
+  for (let i = 0; i < env.synRetries; i++) {
+    t += i < env.linearTimeouts ? INITIAL_RTO_SEC : INITIAL_RTO_SEC * 2 ** (i - env.linearTimeouts);
+    times.push(t);
+  }
+  return times;
+}
+
+/** 再送上限に達した後、カーネルが接続を諦める時刻（最後の SYN の後にもう1回分待つ） */
+export function synGiveUpSec(env: Pick<SynEnv, 'linearTimeouts' | 'synRetries'>): number {
+  const r = env.synRetries;
+  const last = synSchedule(env).at(-1)!;
+  return last + (r < env.linearTimeouts ? INITIAL_RTO_SEC : INITIAL_RTO_SEC * 2 ** (r - env.linearTimeouts));
+}
+
+/** タイムアウト境界付近の SYN は送られるかどうかが揺れるため、両方を許容する幅（秒） */
+export const SYN_BOUNDARY_MARGIN_SEC = 0.25;
+
+const synCountLabel = (n: number) => (n >= 5 ? '5+' : String(n));
+
+export interface MechanismExpectation {
+  /** 項目ごとの許容値（複数あるのはタイムアウト境界の揺れを許容する場合） */
+  expected: Record<string, string[]>;
+  /** drop のときの期待送信時刻（connect-timeout より前のもの）。open/closed は [0] */
+  synSchedule: number[];
+  env: SynEnv;
+}
+
 /**
- * 単元の内部機構から期待される観察結果（ラボが条件どおりに構成されたかの整合確認に使う）。
- * 正誤判定の正解には使わない。正解は常に observe() の結果。
+ * 単元の内部機構と、記録された実行環境の設定から期待される観察結果（ラボが条件どおりに
+ * 構成されたかの整合確認に使う）。正誤判定の正解には使わない。正解は常に observe() の結果。
  */
-export function expectedFromMechanism(portState: string, connectTimeoutSec: number): Observed {
+export function expectedFromMechanism(portState: string, connectTimeoutSec: number, env: SynEnv): MechanismExpectation {
   if (portState === 'open') {
-    return { curlResult: 'connected', synReply: 'syn-ack', synCount: '1', clientState: 'ESTAB', serverState: 'TIME-WAIT', duration: 'server-delay' };
+    return { env, synSchedule: [0], expected: { curlResult: ['connected'], synReply: ['syn-ack'], synCount: ['1'], clientState: ['ESTAB'], serverState: ['TIME-WAIT'], duration: ['server-delay'] } };
   }
   if (portState === 'closed') {
-    return { curlResult: 'refused', synReply: 'rst', synCount: '1', clientState: 'none', serverState: 'none', duration: 'immediate' };
+    return { env, synSchedule: [0], expected: { curlResult: ['refused'], synReply: ['rst'], synCount: ['1'], clientState: ['none'], serverState: ['none'], duration: ['immediate'] } };
   }
-  // drop：Linux の SYN 再送は初期RTO 1秒で倍々（0,1,3,7,15,31,63 秒）。タイムアウトより前に送られる回数
-  const sendTimes = [0, 1, 3, 7, 15, 31, 63];
-  const n = sendTimes.filter((t) => t < connectTimeoutSec).length;
-  return { curlResult: 'timeout', synReply: 'none', synCount: n >= 5 ? '5+' : String(n), clientState: 'SYN-SENT', serverState: 'LISTEN', duration: 'connect-timeout' };
+  // drop：記録された設定から送信時刻を導き、connect-timeout より前に送られる回数を数える
+  const all = synSchedule(env);
+  const sure = all.filter((t) => t < connectTimeoutSec - SYN_BOUNDARY_MARGIN_SEC).length;
+  const maybe = all.filter((t) => t < connectTimeoutSec + SYN_BOUNDARY_MARGIN_SEC).length;
+  const counts = [...new Set(Array.from({ length: maybe - sure + 1 }, (_, i) => synCountLabel(sure + i)))];
+  const expected: Record<string, string[]> = { synReply: ['none'], synCount: counts, clientState: ['SYN-SENT'], serverState: ['LISTEN'] };
+  // カーネルが connect-timeout より先に諦める設定では curl の結果・所要時間は別になるので照合しない
+  if (synGiveUpSec(env) > connectTimeoutSec + SYN_BOUNDARY_MARGIN_SEC) {
+    expected.curlResult = ['timeout'];
+    expected.duration = ['connect-timeout'];
+  }
+  return { env, synSchedule: all.filter((t) => t < connectTimeoutSec + SYN_BOUNDARY_MARGIN_SEC), expected };
+}
+
+/** 再送時刻の許容誤差（秒）：0.3 秒か期待時刻の 10% の大きい方 */
+export const synTimeTolerance = (expectedSec: number) => Math.max(0.3, expectedSec * 0.1);
+
+/** 期待（記録された設定から導出）と、証拠から算出した観察結果を照合する */
+export function checkConsistency(exp: MechanismExpectation, detail: Pick<ObservationDetail, 'observed' | 'synTimes'>): { consistent: boolean; issues: string[] } {
+  const issues: string[] = [];
+  for (const [k, vs] of Object.entries(exp.expected)) {
+    const got = detail.observed[k];
+    if (got === undefined || !vs.includes(got)) issues.push(`${k}: 期待 ${vs.join('|')}、観察 ${got ?? '算出不可'}`);
+  }
+  detail.synTimes.forEach((t, i) => {
+    const e = exp.synSchedule[i];
+    if (e === undefined) issues.push(`SYN#${i + 1}: 期待スケジュールに無い送信（${t.toFixed(3)} 秒）`);
+    else if (Math.abs(t - e) > synTimeTolerance(e)) issues.push(`SYN#${i + 1}: 期待 ${e} 秒、観察 ${t.toFixed(3)} 秒`);
+  });
+  return { consistent: issues.length === 0, issues };
+}
+
+/** 記録された環境が、教材本文・予測問題の前提（LAB_SYN_PREMISE）と一致しているか */
+export function envMatchesPremise(env: SynEnv): boolean {
+  return env.linearTimeouts === LAB_SYN_PREMISE.linearTimeouts && env.synRetries === LAB_SYN_PREMISE.synRetries;
+}
+
+/** lab-env 証拠のテキスト形式（client-run.sh の出力と同じ） */
+export function formatLabEnv(env: SynEnv): string {
+  return [
+    `net.ipv4.tcp_syn_linear_timeouts=${env.linearTimeoutsRecorded ? env.linearTimeouts : 'absent'}`,
+    `net.ipv4.tcp_syn_retries=${env.synRetries}`,
+    `kernel.osrelease=${env.osRelease ?? 'unknown'}`,
+  ].join('\n');
 }

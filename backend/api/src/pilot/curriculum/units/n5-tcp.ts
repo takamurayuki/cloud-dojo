@@ -28,7 +28,8 @@ export const n5TcpUnit = {
         '3ウェイハンドシェイク：接続する側（client）のカーネルが SYN を送り、待ち受けている側（server）のカーネルが SYN-ACK を返し、client が ACK を返した時点で両側のソケットが ESTABLISHED になる。アプリ（curl や Web サーバ）が connect()/accept() を呼ぶだけで、パケットのやり取りはカーネルが行う。',
         '状態遷移：server のソケットは listen() で LISTEN になって SYN を待つ。client のソケットは SYN を送ると SYN_SENT になり、SYN-ACK を受け取ると ESTABLISHED になる。通信が終わり、先に close() した側は TIME_WAIT に入り、遅れて届くパケットに備えて一定時間（Linux では 60 秒）その接続の記録を残す。',
         'RST の発生条件：そのポートで LISTEN しているソケットが無いのに SYN が届くと、server のカーネルは RST（ACK付き）を返して「ここには誰もいない」と即座に知らせる。client の connect() は ECONNREFUSED で失敗し、curl は終了コード 7 になる。',
-        '再送とバックオフ：SYN に何の応答も来ない場合（途中で黙って破棄された場合など）、client のカーネルは SYN を再送する。Linux の初期再送タイムアウトは 1 秒で、待ち時間を毎回 2 倍にしていく（送信は 0秒・1秒後・3秒後・7秒後・15秒後…）。上限（tcp_syn_retries）まで続くが、curl は --connect-timeout で先に打ち切る。',
+        '再送とバックオフ：SYN に何の応答も来ない場合（途中で黙って破棄された場合など）、client のカーネルは SYN を再送する。Linux の初期再送タイムアウトは 1 秒。再送の間隔はカーネルの設定で決まり、net.ipv4.tcp_syn_linear_timeouts（L）回目までは 1 秒間隔のまま、その後は待ち時間を毎回 2 倍にしていく。上限（net.ipv4.tcp_syn_retries）まで続くが、curl は --connect-timeout で先に打ち切る。',
+        'このラボの前提：client では net.ipv4.tcp_syn_linear_timeouts=0、net.ipv4.tcp_syn_retries=6 を設定している（実際の値は証拠「実行環境」に記録される）。L=0 なので最初から倍々になり、SYN の送信は 0秒・1秒後・3秒後・7秒後・15秒後…になる。なお Linux の既定は L=4 で、その場合は最初の再送が 1 秒間隔で続く（0・1・2・3・4・5・7秒…）。',
       ],
     },
     observation: {
@@ -42,7 +43,14 @@ export const n5TcpUnit = {
           tool: 'tcpdump -nn -tt -i eth0 tcp port 8080（client 側）',
           shows: '送受信された TCP パケットの時刻とフラグ',
           howToRead:
-            'Flags [S] は SYN、[S.] は SYN-ACK、[.] は ACK、[R.] は RST（ACK付き）。client→server の [S] が何回出たか、その時刻の間隔（1秒、2秒、4秒…）が再送のバックオフ。',
+            'Flags [S] は SYN、[S.] は SYN-ACK、[.] は ACK、[R.] は RST（ACK付き）。client→server の [S] が何回出たか、その時刻の間隔が再送のバックオフ（このラボの設定 tcp_syn_linear_timeouts=0 では 1秒、2秒、4秒…）。',
+        },
+        {
+          kind: 'lab-env',
+          tool: 'sysctl（client 側の net.ipv4.tcp_syn_linear_timeouts / tcp_syn_retries）と uname -r',
+          shows: 'SYN 再送の間隔と回数を決めるカーネル設定（この試行の実行環境）',
+          howToRead:
+            'tcp_syn_linear_timeouts は最初の何回の再送を 1 秒間隔のままにするか（absent はその設定が無いカーネルで、0 と同じ）。tcp_syn_retries は再送の上限回数。tcpdump の SYN 時刻は、ここに記録された値から決まる時刻と一致するはず。',
         },
         {
           kind: 'ss-client',
@@ -83,7 +91,7 @@ export const n5TcpUnit = {
         variants: [
           { value: 'open', label: 'open（待受あり）', scenario: 'server では Web サーバが 8080 番ポートで待ち受けている。応答を返す前に 1.5 秒の処理時間がかかり、応答後は server 側から接続を閉じる。' },
           { value: 'closed', label: 'closed（待受なし・REJECT相当）', scenario: 'server は起動しているが、8080 番ポートで待ち受けているプロセスは無い。ファイアウォールは何もしていない。' },
-          { value: 'drop', label: 'DROP（黙って破棄）', scenario: 'server では Web サーバが 8080 番ポートで待ち受けているが、server のファイアウォール（iptables）が 8080 宛ての受信パケットを応答なしで破棄する設定になっている。' },
+          { value: 'drop', label: 'DROP（黙って破棄）', scenario: 'server では Web サーバが 8080 番ポートで待ち受けているが、server のファイアウォール（iptables）が 8080 宛ての受信パケットを応答なしで破棄する設定になっている。client のカーネル設定は net.ipv4.tcp_syn_linear_timeouts=0、net.ipv4.tcp_syn_retries=6。' },
         ],
       },
       {
@@ -196,10 +204,11 @@ export const n5TcpUnit = {
     },
     {
       id: 'longer-timeout',
-      prompt: '応答が無いポートに対して --connect-timeout を 20 秒にしたら、SYN は何回送られるか。curl に --connect-timeout を付けなかった場合は何が上限を決めるか。',
+      prompt: 'このラボの設定（net.ipv4.tcp_syn_linear_timeouts=0、tcp_syn_retries=6）のまま、応答が無いポートに対して --connect-timeout を 20 秒にしたら、SYN は何回送られるか。curl に --connect-timeout を付けなかった場合は何が上限を決めるか。client が Linux 既定の tcp_syn_linear_timeouts=4 だったら、--connect-timeout 5 秒での SYN 回数はどう変わるか。',
       rubric: [
-        { id: 'backoff-count', criterion: '0・1・3・7・15 秒の送信時刻から、20 秒以内の SYN 回数を数えている（5 回）' },
-        { id: 'syn-retries', criterion: 'タイムアウト指定が無い場合は client カーネルの tcp_syn_retries（既定 6 回で約 127 秒）が上限になることを述べている' },
+        { id: 'backoff-count', criterion: 'このラボの設定（L=0）での 0・1・3・7・15 秒の送信時刻から、20 秒以内の SYN 回数を数えている（5 回）' },
+        { id: 'syn-retries', criterion: 'タイムアウト指定が無い場合は client カーネルの tcp_syn_retries（このラボでは 6 回で約 127 秒）が上限になることを述べている' },
+        { id: 'linear-timeouts', criterion: 'L=4 では最初の再送が 1 秒間隔（0・1・2・3・4 秒…）になるため、5 秒以内の SYN 回数が L=0 の 3 回から 5 回以上に増えることを、設定から導いている' },
       ],
     },
   ],
@@ -209,5 +218,5 @@ export const n5TcpUnit = {
     { id: 'firewall-drop', name: 'ファイアウォールが黙って破棄する', condition: { portState: 'drop' }, injection: 'server で iptables -A INPUT -p tcp --dport 8080 -j DROP を設定する', symptom: 'curl が応答なしで待たされ、--connect-timeout で時間切れ（exit=28）になる' },
   ],
 
-  requiredEvidence: ['tcpdump', 'ss-client', 'ss-server', 'curl'],
+  requiredEvidence: ['tcpdump', 'ss-client', 'ss-server', 'curl', 'lab-env'],
 } as const;

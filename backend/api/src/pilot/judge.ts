@@ -7,7 +7,7 @@
  *   - completionEligible … 実測証拠・必須証拠・整合・正解・振り返りが揃ったときだけ true
  */
 import type { EvidenceKind, Unit } from './curriculum/schema';
-import { expectedFromMechanism, observe, type Observed } from './evidence/parse';
+import { checkConsistency, envMatchesPremise, expectedFromMechanism, LAB_SYN_PREMISE, observe, parseLabEnv, type Observed, type SynEnv } from './evidence/parse';
 
 export type EvidenceOrigin = 'measured' | 'fixture';
 
@@ -35,6 +35,14 @@ export interface Evaluation {
   evidenceOrigin: EvidenceOrigin | 'mixed' | 'none';
   /** 証拠が条件どおりのラボ構成と整合しているか（ラボ構成不良の検出） */
   evidenceConsistent: boolean;
+  /** 整合しない箇所（期待は記録された実行環境の設定から導出） */
+  consistencyIssues: string[];
+  /** 証拠 lab-env から読んだ実行環境（読めなければ null） */
+  labEnv: SynEnv | null;
+  /** 教材の前提とする実行環境 */
+  labEnvPremise: { linearTimeouts: number; synRetries: number };
+  /** 記録された実行環境から導いた、connect-timeout までの SYN 送信時刻（drop 以外は [0]） */
+  expectedSynTimes: number[] | null;
   missing: string[];
   /** 証拠側の完了要件（振り返りは含まない）を満たしているか */
   evidenceEligible: boolean;
@@ -68,8 +76,19 @@ export function evaluateAttempt(
   const origins = new Set(own.map((e) => e.origin));
   const evidenceOrigin: Evaluation['evidenceOrigin'] = origins.size === 0 ? 'none' : origins.size > 1 ? 'mixed' : [...origins][0];
 
-  const expected = expectedFromMechanism(attempt.condition.portState, timeout);
-  const evidenceConsistent = Object.entries(expected).every(([k, v]) => detail.observed[k] === v);
+  // 整合判定：記録された実行環境（lab-env）の設定から期待スケジュールを導き、実測と照合する
+  const parsedEnv = byKind['lab-env'] !== undefined ? parseLabEnv(byKind['lab-env']) : { env: null, problems: ['lab-env: 証拠なし'] };
+  const labEnv = parsedEnv.env;
+  let consistencyIssues: string[];
+  let expectedSynTimes: number[] | null = null;
+  if (labEnv) {
+    const expectation = expectedFromMechanism(attempt.condition.portState, timeout, labEnv);
+    expectedSynTimes = expectation.synSchedule;
+    consistencyIssues = checkConsistency(expectation, detail).issues;
+  } else {
+    consistencyIssues = [...parsedEnv.problems, '実行環境が記録されていないため期待スケジュールを導けない'];
+  }
+  const evidenceConsistent = consistencyIssues.length === 0;
 
   if (own.length === 0) blockers.push('no-evidence');
   for (const k of unit.requiredEvidence) {
@@ -77,6 +96,8 @@ export function evaluateAttempt(
   }
   if (evidenceOrigin !== 'measured' && evidenceOrigin !== 'none') blockers.push('fixture-evidence');
   if (own.length > 0 && !evidenceConsistent) blockers.push('evidence-inconsistent-with-condition');
+  // 予測問題は教材の前提（LAB_SYN_PREMISE）で出題しているため、実行環境がそれと違えば完了にしない
+  if (labEnv && !envMatchesPremise(labEnv)) blockers.push('lab-env-premise-mismatch');
   if (!predictionCorrect) blockers.push('prediction-incorrect');
 
   return {
@@ -86,6 +107,10 @@ export function evaluateAttempt(
     synTimes: detail.synTimes,
     evidenceOrigin,
     evidenceConsistent,
+    consistencyIssues,
+    labEnv,
+    labEnvPremise: { ...LAB_SYN_PREMISE },
+    expectedSynTimes,
     missing: detail.missing,
     evidenceEligible: blockers.length === 0,
     blockers,

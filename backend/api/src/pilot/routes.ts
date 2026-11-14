@@ -11,18 +11,61 @@ import { getUnit, listUnits } from './curriculum';
 import { deriveCondition, describeCondition, newSeed } from './conditions';
 import { fixtureEvidence } from './evidence/fixtures';
 import { attemptCompletion, evaluateAttempt, unitCompletion, type Reflection } from './judge';
-import { LabUnavailableError, type LabRunner } from './lab/runner';
+import { LabLock, sharedLabLock } from './lab/lock';
+import { LabTimeoutError, LabUnavailableError, type LabRunner } from './lab/runner';
 import type { AttemptRow, PilotStore } from './store';
 
 export interface PilotDeps {
   store: PilotStore;
   lab: LabRunner;
+  /** ラボ操作の排他区間（既定はプロセス共有の sharedLabLock） */
+  labLock?: LabLock;
 }
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const isLoopback = (ip: string) => LOOPBACK.has(ip) || /^127\.\d+\.\d+\.\d+$/.test(ip) || /^::ffff:127\.\d+\.\d+\.\d+$/.test(ip);
+
+/** 転送ヘッダの1要素（"[::1]:1234"・"1.2.3.4:5678"・'"::1"' など）からアドレスだけを取り出す */
+function stripAddr(raw: string): string {
+  let v = raw.trim().replace(/^"|"$/g, '');
+  if (v.startsWith('[')) return v.slice(1, v.indexOf(']') > 0 ? v.indexOf(']') : undefined);
+  if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(v)) v = v.slice(0, v.lastIndexOf(':'));
+  return v;
+}
+
+/**
+ * プロキシが付けた転送ヘッダ（X-Forwarded-For・X-Real-IP・Forwarded）に記録された元の接続元。
+ * Vite の開発サーバ等のプロキシ経由で届いた要求は TCP 上は loopback に見えるため、元の接続元も検査する。
+ */
+export function forwardedClients(headers: Record<string, string | string[] | undefined>): string[] {
+  const all = (h: string | string[] | undefined) => (h === undefined ? [] : Array.isArray(h) ? h : [h]);
+  const out: string[] = [];
+  for (const v of all(headers['x-forwarded-for'])) out.push(...v.split(',').map(stripAddr).filter(Boolean));
+  for (const v of all(headers['x-real-ip'])) out.push(stripAddr(v));
+  for (const v of all(headers.forwarded)) {
+    for (const m of v.matchAll(/for=("[^"]*"|[^;,\s]+)/gi)) out.push(stripAddr(m[1]));
+  }
+  return out;
+}
 
 function dockerMissing(reply: FastifyReply, e: LabUnavailableError) {
   return reply.status(503).send({ error: e.code, message: e.message, hint: 'Docker Desktop（または Docker Engine）を起動してから再試行してください。Docker が無い環境ではフィクスチャ実行（練習用・完了不可）を使えます。' });
+}
+
+function labTimedOut(reply: FastifyReply, e: LabTimeoutError) {
+  return reply.status(504).send({
+    error: e.code,
+    message: e.message,
+    operation: e.operation,
+    step: e.step,
+    limitMs: e.limitMs,
+    // 期限超過時に行ったラボの停止・削除の結果（成否と内訳）
+    cleanup: e.cleanup,
+  });
+}
+
+function labBusy(reply: FastifyReply, lock: LabLock) {
+  return reply.status(409).send({ error: 'LAB_BUSY', message: 'ラボは別の操作で使用中です。終わってから再試行してください', holder: lock.current() });
 }
 
 const createAttemptBody = z.object({ unitId: z.string(), seed: z.string().min(1).max(64).optional() });
@@ -36,11 +79,15 @@ const reflectionBody = z.object({
 
 export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
   const { store, lab } = opts;
+  const labLock = opts.labLock ?? sharedLabLock;
 
-  // ラボ・試行 API はローカル利用者専用（127.0.0.1 のみ）
+  // ラボ・試行 API はローカル利用者専用（127.0.0.1 のみ）。
+  // 接続元が loopback でも、プロキシの転送ヘッダに loopback 以外の元の接続元があれば拒否する
+  // （別端末 → Vite 開発サーバのプロキシ → API という迂回を塞ぐ。trustProxy は使わないので req.ip は TCP の接続元）
   fastify.addHook('onRequest', async (req, reply) => {
-    if (!LOOPBACK.has(req.ip)) {
-      return reply.status(403).send({ error: 'LOOPBACK_ONLY', message: 'この API は 127.0.0.1 からのみ利用できます' });
+    const forwarded = forwardedClients(req.headers);
+    if (!isLoopback(req.ip) || forwarded.some((ip) => !isLoopback(ip))) {
+      return reply.status(403).send({ error: 'LOOPBACK_ONLY', message: 'この API は 127.0.0.1 からのみ利用できます（プロキシ経由で別端末から届いた要求も拒否します）' });
     }
   });
 
@@ -62,6 +109,7 @@ export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
       predictionLocked: locked,
       predictionLockedAt: attempt.predictionLockedAt,
       prediction: attempt.prediction,
+      running: attempt.runState === 'running',
       evidence: evidence.map((e) => ({ kind: e.kind, origin: e.origin, sha256: e.sha256, collectedAt: e.collectedAt })),
       evaluation,
       reflection,
@@ -149,29 +197,52 @@ export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
     if (!requireLocked(a, reply)) return;
     const body = runBody.safeParse(req.body ?? {});
     if (!body.success) return reply.status(400).send({ error: 'BAD_REQUEST', issues: body.error.issues });
-    if (store.listEvidence(a.id).length > 0) return reply.status(409).send({ error: 'ALREADY_RUN', message: 'この試行は実行済みです。新しい条件で試すには新しい試行を作成してください' });
+
+    // 試行の実行を原子的に確保する（同じ試行の二重 run は、実行中でも実行済みでも 409）
+    if (!store.claimRun(a.id)) {
+      const current = store.getAttempt(a.id);
+      if (current?.runState === 'running') return reply.status(409).send({ error: 'RUN_IN_PROGRESS', message: 'この試行は実行中です' });
+      return reply.status(409).send({ error: 'ALREADY_RUN', message: 'この試行は実行済みです。新しい条件で試すには新しい試行を作成してください' });
+    }
 
     const cond = { portState: a.condition.portState, connectTimeout: a.condition.connectTimeout };
-    let texts;
+    let texts: Awaited<ReturnType<LabRunner['collect']>>;
     let origin: 'measured' | 'fixture';
     if (body.data.mode === 'fixture') {
       texts = fixtureEvidence(cond.portState, Number(cond.connectTimeout));
       origin = 'fixture';
     } else {
+      // ラボ操作全体（リセット・起動・条件適用・接続・証拠収集）を単一の排他区間で行う
+      const release = labLock.tryAcquire(`run:${a.id}`);
+      if (!release) {
+        store.releaseRun(a.id);
+        return labBusy(reply, labLock);
+      }
       try {
         texts = await lab.collect(cond);
         origin = 'measured';
       } catch (e) {
+        store.releaseRun(a.id);
         if (e instanceof LabUnavailableError) return dockerMissing(reply, e);
         req.log.error(e);
+        if (e instanceof LabTimeoutError) return labTimedOut(reply, e);
         return reply.status(500).send({ error: 'LAB_ERROR', message: (e as Error).message });
+      } finally {
+        release();
       }
     }
-    for (const [kind, content] of Object.entries(texts)) {
-      store.addEvidence(a.id, kind as keyof typeof texts, origin, content);
+
+    // 証拠一式は収集が完了してから、評価と一緒に1トランザクションで保存する
+    try {
+      const records = Object.entries(texts).map(([kind, content]) => store.buildEvidence(a.id, kind as keyof typeof texts, origin, content));
+      const unit = getUnit(a.unitId)!;
+      const evaluation = evaluateAttempt(unit, { id: a.id, condition: a.condition, prediction: a.prediction! }, records);
+      store.saveRunResult(a.id, records, evaluation);
+    } catch (e) {
+      store.releaseRun(a.id);
+      req.log.error(e);
+      return reply.status(500).send({ error: 'SAVE_FAILED', message: (e as Error).message });
     }
-    const unit = getUnit(a.unitId)!;
-    store.saveEvaluation(a.id, evaluateAttempt(unit, { id: a.id, condition: a.condition, prediction: a.prediction! }, store.listEvidence(a.id)));
     return view(store.getAttempt(a.id)!);
   });
 
@@ -209,10 +280,22 @@ export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
       return await fn();
     } catch (e) {
       if (e instanceof LabUnavailableError) return dockerMissing(reply, e);
+      if (e instanceof LabTimeoutError) return labTimedOut(reply, e);
       return reply.status(500).send({ error: 'LAB_ERROR', message: (e as Error).message });
     }
   };
-  fastify.get('/lab/status', async (_req, reply) => labCall(reply, () => lab.status()));
-  fastify.post('/lab/start', async (_req, reply) => labCall(reply, () => lab.start()));
-  fastify.post('/lab/reset', async (_req, reply) => labCall(reply, () => lab.reset()));
+  /** ラボを変更する操作は排他区間で行う。使用中なら 409 LAB_BUSY */
+  const exclusiveLabCall = async (owner: string, reply: FastifyReply, fn: () => Promise<unknown>) => {
+    const release = labLock.tryAcquire(owner);
+    if (!release) return labBusy(reply, labLock);
+    try {
+      return await labCall(reply, fn);
+    } finally {
+      release();
+    }
+  };
+  // status は読み取りのみなので排他しない（使用中なら保持者も返す）
+  fastify.get('/lab/status', async (_req, reply) => labCall(reply, async () => ({ ...(await lab.status()), busy: labLock.current() })));
+  fastify.post('/lab/start', async (_req, reply) => exclusiveLabCall('lab/start', reply, () => lab.start()));
+  fastify.post('/lab/reset', async (_req, reply) => exclusiveLabCall('lab/reset', reply, () => lab.reset()));
 }

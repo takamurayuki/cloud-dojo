@@ -4,7 +4,7 @@
  * フィクスチャ由来の証拠は origin='fixture' として保存され、単元の完了条件を満たさない。
  */
 import type { EvidenceKind } from '../curriculum/schema';
-import { LAB_PORT, SERVER_DELAY_SEC } from './parse';
+import { formatLabEnv, LAB_PORT, PREMISE_ENV, SERVER_DELAY_SEC, synSchedule, type SynEnv } from './parse';
 
 const CLIENT = '172.30.0.2';
 const SERVER = '172.30.0.3';
@@ -21,7 +21,15 @@ function ssRow(state: string, local: string, peer: string, sendQ = 0): string {
   return `${state.padEnd(10)} 0      ${String(sendQ).padEnd(8)} ${local.padStart(19)} ${peer.padStart(20)}`;
 }
 
-export function fixtureEvidence(portState: string, connectTimeoutSec: number): Record<EvidenceKind, string> {
+/**
+ * @param env client の実行環境（既定はラボの前提 PREMISE_ENV：tcp_syn_linear_timeouts=0・tcp_syn_retries=6）。
+ *            DROP の SYN 再送時刻はこの設定から導く。lab-env 証拠にもこの値を記録する。
+ */
+export function fixtureEvidence(portState: string, connectTimeoutSec: number, env: SynEnv = { ...PREMISE_ENV, osRelease: 'fixture' }): Record<EvidenceKind, string> {
+  return { ...connectionEvidence(portState, connectTimeoutSec, env), 'lab-env': formatLabEnv(env) };
+}
+
+function connectionEvidence(portState: string, connectTimeoutSec: number, env: SynEnv): Omit<Record<EvidenceKind, string>, 'lab-env'> {
   const sport = 45678;
   const synOpts = 'options [mss 1460,sackOK,TS val 1000 ecr 0,nop,wscale 7], length 0';
   if (portState === 'open') {
@@ -63,8 +71,8 @@ export function fixtureEvidence(portState: string, connectTimeoutSec: number): R
       curl: `time_total=0.000912 http_code=000\nexit=7\ncurl: (7) Failed to connect to server port ${LAB_PORT} after 0 ms: Couldn't connect to server`,
     };
   }
-  // drop
-  const sendTimes = [0, 1, 3, 7, 15, 31, 63].filter((t) => t < connectTimeoutSec);
+  // drop：記録する環境設定から導いた送信時刻のうち、connect-timeout より前のもの
+  const sendTimes = synSchedule(env).filter((t) => t < connectTimeoutSec);
   const lines = sendTimes.map((t, i) => pkt(t + 0.0001 + i * 0.00002, 'c', sport, 'S', `seq 1047265311, win 64240, ${synOpts}`));
   return {
     tcpdump: [...lines, '', `${lines.length} packets captured`].join('\n'),

@@ -12,8 +12,11 @@ import { z } from 'zod';
 export const LOOP_STAGES = ['predict', 'execute', 'observe', 'explain', 'counterfactual'] as const;
 export type LoopStage = (typeof LOOP_STAGES)[number];
 
-/** 観察証拠の種類。単元・ルーブリックはこの種類で必要な証拠を宣言する */
-export const EVIDENCE_KINDS = ['tcpdump', 'ss-client', 'ss-server', 'curl'] as const;
+/**
+ * 観察証拠の種類。単元・ルーブリックはこの種類で必要な証拠を宣言する。
+ * lab-env は実行環境の記録（client の sysctl 値など）で、整合判定の前提に使う。
+ */
+export const EVIDENCE_KINDS = ['tcpdump', 'ss-client', 'ss-server', 'curl', 'lab-env'] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 
 const nonEmpty = z.string().trim().min(1);

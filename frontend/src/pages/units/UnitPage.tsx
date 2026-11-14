@@ -27,8 +27,9 @@ const STORAGE_KEY = (unitId: string) => `pilot-attempt-${unitId}`;
 const BLOCKER_LABELS: Record<string, string> = {
   'no-evidence': '観察証拠がない',
   'fixture-evidence': 'フィクスチャ（模擬）証拠のため完了にできない',
-  'prediction-incorrect': '予測が実測と一致していない',
-  'evidence-inconsistent-with-condition': '証拠が条件どおりのラボ構成と一致しない（ラボ構成不良の可能性）',
+  'prediction-incorrect': '予測が観察結果と一致していない',
+  'evidence-inconsistent-with-condition': '証拠が、条件と記録された実行環境から期待される結果と一致しない（ラボ構成不良の可能性）',
+  'lab-env-premise-mismatch': 'ラボの実行環境（SYN 再送の設定）が教材の前提と異なる',
   'evidence-from-other-attempt': '別の試行の証拠が混じっている',
   'reflection-not-recorded': '説明・反事実が未記録',
   'causal-text-too-short': '因果説明の記述が短すぎる（30文字以上）',
@@ -45,6 +46,16 @@ function blockerLabel(b: string): string {
 }
 
 const ORIGIN_LABEL: Record<string, string> = { measured: '実測', fixture: 'フィクスチャ（模擬）', mixed: '混在', none: 'なし' };
+
+/** 証拠から算出した値の呼び方。実測のときだけ「実測」と呼び、それ以外は由来を添えて「観察結果」と呼ぶ */
+const OBSERVED_LABEL: Record<string, string> = { measured: '実測', fixture: '観察結果（フィクスチャ）', mixed: '観察結果（実測とフィクスチャの混在）', none: '観察結果' };
+
+const ERROR_TITLES: Record<string, string> = {
+  DOCKER_NOT_FOUND: 'Docker 未検出',
+  LAB_BUSY: 'ラボは使用中',
+  LAB_TIMEOUT: 'ラボ操作が期限を超えた',
+  RUN_IN_PROGRESS: 'この試行は実行中',
+};
 
 function Card({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
   return (
@@ -64,7 +75,7 @@ function ErrorBox({ error }: { error: ApiError | null }) {
     <div className="rounded-xl border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-200 flex gap-2" role="alert">
       <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
       <div>
-        <div className="font-semibold">{error.code === 'DOCKER_NOT_FOUND' ? 'Docker 未検出' : `エラー（${error.code}）`}</div>
+        <div className="font-semibold">{ERROR_TITLES[error.code] ?? `エラー（${error.code}）`}</div>
         <div>{error.message}</div>
         {error.hint && <div className="mt-1 opacity-80">{error.hint}</div>}
       </div>
@@ -170,11 +181,12 @@ export function UnitPage() {
     );
   }
 
-  const isLabError = error !== null && ['DOCKER_NOT_FOUND', 'LAB_ERROR'].includes(error.code);
+  const isLabError = error !== null && ['DOCKER_NOT_FOUND', 'LAB_ERROR', 'LAB_BUSY', 'LAB_TIMEOUT'].includes(error.code);
   const fieldsComplete = unit.prediction.fields.every((f) => answers[f.id]);
   const locked = attempt?.predictionLocked ?? false;
   const evaluation = attempt?.evaluation ?? null;
   const isFixture = evidence.length > 0 && evidence.some((e) => e.origin === 'fixture');
+  const observedLabel = OBSERVED_LABEL[evaluation?.evidenceOrigin ?? 'none'];
   const stageIndex = !attempt ? -1 : unit.loop.findIndex((s) => s.stage === attempt.stage);
   const evidenceByKind = Object.fromEntries(evidence.map((e) => [e.kind, e]));
   const optionLabel = (fieldId: string, v: string | null) =>
@@ -398,6 +410,7 @@ export function UnitPage() {
             ) : lab ? (
               <div className="text-sm space-y-1" data-testid="lab-status">
                 <div>状態：{lab.running ? '起動中' : '停止'}</div>
+                {lab.busy && <div className="text-amber-200">使用中：{lab.busy.owner}（{lab.busy.since} から）</div>}
                 <div>ネットワーク：{lab.network ? `${lab.network.name}（${lab.network.internal ? 'internal・外部疎通なし' : '外部疎通あり'}）` : 'なし'}</div>
                 <ul>
                   {lab.nodes.map((n) => (
@@ -468,6 +481,19 @@ export function UnitPage() {
                 {evaluation && evaluation.synTimes.length > 0 && (
                   <div className="text-sm">SYN の送信時刻（最初の SYN からの秒）：{evaluation.synTimes.map((t) => t.toFixed(3)).join(' / ')}</div>
                 )}
+                {/* 旧版で保存された評価には実行環境の項目が無い */}
+                {evaluation?.labEnvPremise && (
+                  <div className="text-sm" data-testid="lab-env">
+                    実行環境：
+                    {evaluation.labEnv
+                      ? `tcp_syn_linear_timeouts=${evaluation.labEnv.linearTimeoutsRecorded ? evaluation.labEnv.linearTimeouts : 'absent（0 と同じ）'}、tcp_syn_retries=${evaluation.labEnv.synRetries}`
+                      : '記録なし'}
+                    （教材の前提：tcp_syn_linear_timeouts={evaluation.labEnvPremise.linearTimeouts}、tcp_syn_retries={evaluation.labEnvPremise.synRetries}）
+                    {evaluation.expectedSynTimes && evaluation.expectedSynTimes.length > 1 && (
+                      <div>この設定から期待される SYN の送信時刻：{evaluation.expectedSynTimes.join(' / ')} 秒</div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </Card>
@@ -482,7 +508,7 @@ export function UnitPage() {
                   <tr className="text-left text-muted-foreground">
                     <th className="py-1 pr-2">項目</th>
                     <th className="py-1 pr-2">予測</th>
-                    <th className="py-1 pr-2">実測（証拠から算出）</th>
+                    <th className="py-1 pr-2" data-testid="observed-column">{observedLabel}（証拠から算出）</th>
                     <th className="py-1" />
                   </tr>
                 </thead>
@@ -498,8 +524,18 @@ export function UnitPage() {
                 </tbody>
               </table>
               <div className="text-sm font-semibold">
-                予測：{evaluation.predictionCorrect ? '全項目が実測と一致' : `${evaluation.fields.filter((f) => !f.correct).length} 項目が実測と不一致`}
+                予測：{evaluation.predictionCorrect ? `全項目が${observedLabel}と一致` : `${evaluation.fields.filter((f) => !f.correct).length} 項目が${observedLabel}と不一致`}
               </div>
+              {!evaluation.evidenceConsistent && (evaluation.consistencyIssues ?? []).length > 0 && (
+                <div className="text-sm text-amber-200" data-testid="consistency-issues">
+                  <div className="font-semibold">条件・実行環境から期待される結果との食い違い</div>
+                  <ul className="list-disc pl-5">
+                    {evaluation.consistencyIssues.map((s) => (
+                      <li key={s}>{s}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div className="text-sm" data-testid="attempt-completion">
                 <div className="font-semibold">この試行：{attempt.completion.completed ? '完了条件を満たした' : '未完了'}</div>
                 {attempt.completion.blockers.length > 0 && (

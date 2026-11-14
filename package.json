@@ -11,7 +11,7 @@
     "dev": "concurrently \"pnpm run dev:frontend\" \"pnpm run dev:api\"",
     "dev:frontend": "pnpm --filter cloud-dojo-frontend dev",
     "dev:api": "pnpm --filter cloud-dojo-api dev",
-    "dev:pilot": "concurrently \"pnpm --filter cloud-dojo-api dev:pilot\" \"pnpm run dev:frontend\"",
+    "dev:pilot": "concurrently \"pnpm --filter cloud-dojo-api dev:pilot\" \"pnpm --filter cloud-dojo-frontend dev:pilot\"",
     "dev:worker": "cd backend/worker && go run cmd/server/main.go",
     "build": "pnpm run build:frontend && pnpm run build:api && pnpm run build:worker",
     "build:frontend": "pnpm --filter cloud-dojo-frontend build",

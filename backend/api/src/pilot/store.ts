@@ -18,6 +18,8 @@ export interface AttemptRow {
   createdAt: string;
   prediction: Record<string, string> | null;
   predictionLockedAt: string | null;
+  /** 実行状態：null＝未実行、'running'＝実行中（確保済み）、'done'＝証拠保存済み */
+  runState: 'running' | 'done' | null;
 }
 
 export interface StoredEvidence extends EvidenceRecord {
@@ -74,6 +76,13 @@ export class PilotStore {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
+    // 既存 DB への列追加（初版の DB には run_state が無い）
+    const cols = new Set(this.db.prepare('PRAGMA table_info(attempts)').all().map((r) => String(r.name)));
+    if (!cols.has('run_state')) this.db.exec('ALTER TABLE attempts ADD COLUMN run_state TEXT');
+    if (!cols.has('run_started_at')) this.db.exec('ALTER TABLE attempts ADD COLUMN run_started_at TEXT');
+    // パイロットは単一プロセスで DB を使う。起動時に残っている「実行中」は前のプロセスの中断なので解放する
+    // （証拠は一括保存のため、中断した試行に部分証拠は残っていない）
+    this.db.exec("UPDATE attempts SET run_state = NULL, run_started_at = NULL WHERE run_state = 'running'");
   }
 
   close() {
@@ -81,7 +90,7 @@ export class PilotStore {
   }
 
   createAttempt(unitId: string, seed: string, condition: Record<string, string>): AttemptRow {
-    const row: AttemptRow = { id: randomUUID(), unitId, seed, condition, createdAt: now(), prediction: null, predictionLockedAt: null };
+    const row: AttemptRow = { id: randomUUID(), unitId, seed, condition, createdAt: now(), prediction: null, predictionLockedAt: null, runState: null };
     this.db
       .prepare('INSERT INTO attempts (id, unit_id, seed, condition_json, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(row.id, unitId, seed, JSON.stringify(condition), row.createdAt);
@@ -105,8 +114,27 @@ export class PilotStore {
     return Number(r.changes) === 1;
   }
 
-  addEvidence(attemptId: string, kind: EvidenceKind, origin: EvidenceOrigin, content: string): StoredEvidence {
-    const e: StoredEvidence = {
+  /**
+   * 試行の実行を原子的に確保する（未実行かつ証拠なしのときだけ 'running' にする）。
+   * 確保できなければ false（実行中または実行済み）。
+   */
+  claimRun(id: string): boolean {
+    const r = this.db
+      .prepare(
+        "UPDATE attempts SET run_state = 'running', run_started_at = ? WHERE id = ? AND run_state IS NULL AND prediction_locked_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM evidence WHERE attempt_id = ?)",
+      )
+      .run(now(), id, id);
+    return Number(r.changes) === 1;
+  }
+
+  /** 実行が失敗したとき確保を解く（証拠は保存されていないので、同じ試行で再実行できる） */
+  releaseRun(id: string) {
+    this.db.prepare("UPDATE attempts SET run_state = NULL, run_started_at = NULL WHERE id = ? AND run_state = 'running'").run(id);
+  }
+
+  /** 証拠レコードを作る（保存はしない）。判定は保存前にこのレコードで行う */
+  buildEvidence(attemptId: string, kind: EvidenceKind, origin: EvidenceOrigin, content: string): StoredEvidence {
+    return {
       id: randomUUID(),
       attemptId,
       kind,
@@ -115,10 +143,41 @@ export class PilotStore {
       sha256: createHash('sha256').update(content).digest('hex'),
       collectedAt: now(),
     };
+  }
+
+  private insertEvidence(e: StoredEvidence) {
     this.db
       .prepare('INSERT INTO evidence (id, attempt_id, kind, origin, content, sha256, collected_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(e.id, attemptId, kind, origin, content, e.sha256, e.collectedAt);
+      .run(e.id, e.attemptId, e.kind, e.origin, e.content, e.sha256, e.collectedAt);
+  }
+
+  addEvidence(attemptId: string, kind: EvidenceKind, origin: EvidenceOrigin, content: string): StoredEvidence {
+    const e = this.buildEvidence(attemptId, kind, origin, content);
+    this.insertEvidence(e);
     return e;
+  }
+
+  /**
+   * 実行結果（証拠一式と評価）を1つのトランザクションで保存し、実行状態を 'done' にする。
+   * 途中で失敗したら全て取り消す（部分証拠を残さない）。確保（'running'）していない試行には保存しない。
+   */
+  saveRunResult(attemptId: string, evidence: StoredEvidence[], ev: Evaluation) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const done = this.db
+        .prepare("UPDATE attempts SET run_state = 'done' WHERE id = ? AND run_state = 'running'")
+        .run(attemptId);
+      if (Number(done.changes) !== 1) throw new Error(`試行 ${attemptId} は実行中として確保されていない`);
+      for (const e of evidence) {
+        if (e.attemptId !== attemptId) throw new Error('別試行の証拠は保存できない');
+        this.insertEvidence(e);
+      }
+      this.saveEvaluation(attemptId, ev);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   listEvidence(attemptId: string): StoredEvidence[] {
@@ -159,6 +218,10 @@ export class PilotStore {
   }
 }
 
+function toRunState(v: unknown): AttemptRow['runState'] {
+  return v === 'running' ? 'running' : v === 'done' ? 'done' : null;
+}
+
 function toAttempt(r: Record<string, unknown>): AttemptRow {
   return {
     id: String(r.id),
@@ -168,5 +231,6 @@ function toAttempt(r: Record<string, unknown>): AttemptRow {
     createdAt: String(r.created_at),
     prediction: r.prediction_json ? JSON.parse(String(r.prediction_json)) : null,
     predictionLockedAt: r.prediction_locked_at ? String(r.prediction_locked_at) : null,
+    runState: toRunState(r.run_state),
   };
 }
