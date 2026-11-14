@@ -14,6 +14,7 @@ import {
 import {
   ApiError,
   cleanupPendingHint,
+  LAB_CLEANUP_RECOVERY_STEPS,
   pilotApi,
   type Attempt,
   type EvidenceItem,
@@ -71,6 +72,23 @@ function Card({ title, children, right }: { title: string; children: React.React
   );
 }
 
+/** 後始末中が続く場合の復旧手順（開いて読む。README「後始末中が続く場合」と同じ内容） */
+function RecoverySteps() {
+  return (
+    <details className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-amber-100" data-testid="lab-recovery-steps">
+      <summary className="cursor-pointer font-semibold select-none">復旧手順</summary>
+      <ol className="mt-2 list-decimal space-y-1 pl-5">
+        {LAB_CLEANUP_RECOVERY_STEPS.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      <div className="mt-2 text-xs opacity-80">
+        同じ内容をリポジトリの backend/api/src/pilot/README.md「後始末中が続く場合」にも記載しています。
+      </div>
+    </details>
+  );
+}
+
 function ErrorBox({ error }: { error: ApiError | null }) {
   if (!error) return null;
   return (
@@ -80,6 +98,7 @@ function ErrorBox({ error }: { error: ApiError | null }) {
         <div className="font-semibold">{ERROR_TITLES[error.code] ?? `エラー（${error.code}）`}</div>
         <div>{error.message}</div>
         {error.hint && <div className="mt-1 opacity-80">{error.hint}</div>}
+        {error.recovery && <RecoverySteps />}
       </div>
     </div>
   );
@@ -416,6 +435,7 @@ export function UnitPage() {
                 {lab.cleanupPending && (
                   <div className="text-amber-200" data-testid="lab-cleanup-pending">
                     後始末中：{cleanupPendingHint(lab.cleanupPending)}
+                    <RecoverySteps />
                   </div>
                 )}
                 <div>ネットワーク：{lab.network ? `${lab.network.name}（${lab.network.internal ? 'internal・外部疎通なし' : '外部疎通あり'}）` : 'なし'}</div>

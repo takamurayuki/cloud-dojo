@@ -5,6 +5,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import {
   isNotFound,
+  isPilotLabLabels,
   PilotLabProtectedError,
   protectedBody,
   resolveUnprotectedContainer,
@@ -43,6 +44,34 @@ async function checkDockerStatus(): Promise<{ running: boolean; error?: string }
   }
 }
 
+/** /lab/create：同名の既存ネットワークがラボ用だと確かめられない（再利用しない） */
+class LabNetworkUnverifiedError extends Error {
+  readonly code = 'LAB_NETWORK_UNVERIFIED';
+  constructor(name: string, why: string) {
+    super(`ネットワーク ${name} は既にありますが、${why}ため、ネットワークラボには使いません。別の名前を指定するか、そのネットワークを確認してください`);
+    this.name = 'LabNetworkUnverifiedError';
+  }
+}
+
+/**
+ * 名前で指定されたネットワークが既にあれば inspect し、ネットワークラボ用であることを確かめて、確かめた完全な ID のハンドルを返す。
+ * 無ければ（404）null。条件：名前が完全に一致し、ラベル cloud-dojo=network-lab を持ち、パイロットのラベル（cloud-dojo.lab）を持たないこと。
+ * パイロットのラボなら PilotLabProtectedError（403）、それ以外の不一致は LabNetworkUnverifiedError（409）。inspect のその他の失敗はそのまま投げる。
+ */
+async function resolveReusableLabNetwork(name: string): Promise<Docker.Network | null> {
+  let info: { Id: string; Name?: string; Labels?: Record<string, string> | null };
+  try {
+    info = (await docker.getNetwork(name).inspect()) as typeof info;
+  } catch (error) {
+    if (isNotFound(error)) return null;
+    throw error;
+  }
+  if (isPilotLabLabels(info.Labels)) throw new PilotLabProtectedError(info.Id);
+  if (info.Name !== name) throw new LabNetworkUnverifiedError(name, `名前が一致しない（${info.Name ?? '不明'}）`);
+  if (info.Labels?.['cloud-dojo'] !== 'network-lab') throw new LabNetworkUnverifiedError(name, 'ネットワークラボのラベル（cloud-dojo=network-lab）が無い');
+  return docker.getNetwork(info.Id);
+}
+
 export async function networkRoutes(fastify: FastifyInstance) {
   // ネットワークラボ環境を作成
   fastify.post('/lab/create', async (request, reply) => {
@@ -72,6 +101,10 @@ export async function networkRoutes(fastify: FastifyInstance) {
         }
       }
 
+      // 同名のネットワークが既にあれば、ラボ用（ラベル cloud-dojo=network-lab・パイロットのラベル無し）であることを
+      // 確かめてから再利用する。確かめられなければ、何も作成・削除せずに拒否する（通常のコンテナを別用途のネットワークへ参加させない）
+      let reuseNetwork = await resolveReusableLabNetwork(networkName);
+
       // Alpine イメージの確認とpull
       try {
         await docker.getImage('alpine:latest').inspect();
@@ -92,25 +125,28 @@ export async function networkRoutes(fastify: FastifyInstance) {
 
       // カスタムネットワークを作成
       let network;
-      try {
-        network = await docker.createNetwork({
-          Name: networkName,
-          Driver: 'bridge',
-          Internal: false,
-          Attachable: true,
-          Labels: {
-            'cloud-dojo': 'network-lab',
-          },
-        });
-      } catch (error: any) {
-        // ネットワークが既に存在する場合は取得
-        if (error.statusCode === 409) {
-          const networks = await docker.listNetworks({
-            filters: { name: [networkName] },
+      if (reuseNetwork) {
+        network = reuseNetwork;
+      } else {
+        try {
+          network = await docker.createNetwork({
+            Name: networkName,
+            Driver: 'bridge',
+            Internal: false,
+            Attachable: true,
+            Labels: {
+              'cloud-dojo': 'network-lab',
+            },
           });
-          network = docker.getNetwork(networks[0].Id);
-        } else {
-          throw error;
+        } catch (error: any) {
+          // 確認の後に同名のネットワークが作られた場合（409）も、同じ確認を通ったものだけ再利用する
+          if (error.statusCode === 409) {
+            reuseNetwork = await resolveReusableLabNetwork(networkName);
+            if (!reuseNetwork) throw error;
+            network = reuseNetwork;
+          } else {
+            throw error;
+          }
         }
       }
 
@@ -165,6 +201,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
       };
     } catch (error) {
       if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
+      if (error instanceof LabNetworkUnverifiedError) return reply.code(409).send({ error: error.code, message: error.message });
       fastify.log.error({ error }, 'Failed to create network lab');
       return reply.code(500).send({
         error: 'Failed to create network lab',

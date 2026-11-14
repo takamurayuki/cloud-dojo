@@ -11,7 +11,7 @@ import {
   isRedisAvailable,
 } from './queue';
 import { dockerService } from './docker';
-import { DockerComposeService } from './compose';
+import { DockerComposeService, runComposeUpJob } from './compose';
 import { k8sService } from './kubernetes';
 import { cicdService } from './cicd';
 import type { FastifyInstance } from 'fastify';
@@ -241,27 +241,10 @@ export async function initializeWorkers(fastify?: FastifyInstance) {
     composeUpWorker = new Worker<ComposeUpTask>(
       'compose-up',
       async (job: Job<ComposeUpTask>) => {
-        const { composeYaml, projectName } = job.data;
-
-        try {
-          await job.updateProgress(10);
-          totalServices = 0;
-          completedServices = 0;
-
-          // Execute docker-compose up
-          const session = await composeService.composeUp(composeYaml, projectName);
-
-          await job.updateProgress(100);
-
-          return {
-            success: true,
-            projectName,
-            sessionId: session.id,
-            message: 'Compose project started successfully',
-          };
-        } catch (error: any) {
-          throw new Error(`Compose up failed: ${error.message}`);
-        }
+        totalServices = 0;
+        completedServices = 0;
+        // Execute docker-compose up（パイロットのラボの保護で拒否したサービスがあればジョブを失敗させる）
+        return runComposeUpJob(composeService, job.data, (p) => job.updateProgress(p));
       },
       {
         connection,

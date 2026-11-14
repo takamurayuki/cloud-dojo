@@ -42,17 +42,27 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
 - **後始末中が続く場合**：Docker が応答を返さないまま、または削除を確認できない対象が残ったときは、待っても後始末中
   （409 `LAB_CLEANUP_PENDING`）が解除されない（画面にもこの案内を表示する）。復旧手順：
   1. API プロセスを再起動する（`pnpm run dev:pilot` を止めて起動し直す）。後始末中の状態はプロセス内にだけあるので解除される。
-  2. 画面の「ラボで実行（実測）」または `POST /api/pilot/lab/reset` を行う。前のプロセスのものを含むラベル付きのラボが全て削除される。
+  2. 画面の「リセット」（`POST /api/pilot/lab/reset`）を行う。前のプロセスのものを含むラベル付きのラボが全て削除される
+     （削除だけで、ラボは停止したままになる。続けて使うときは「起動」）。代わりに「ラボで実行（実測）」でもよい。こちらは
+     同じ削除のあとに実測用のラボを新しく起動して実測する（実測後もそのラボは起動したまま残る）。
+     画面では、この手順を「復旧手順」として開いて読める（ラボ欄の後始末中の表示と、409／504 のエラー表示）。
   3. それでも残る場合は Docker 自体を確認する（`docker ps -a --filter label=cloud-dojo.lab`、`docker network ls --filter label=cloud-dojo.lab`）。
 - **既存 API との併用**：既存サーバ（`pnpm dev:api`）はパイロットと既存 API を同時に登録する。既存 API のうちコンテナ・
   ネットワークを実行・停止・削除する経路は、対象がラベル `cloud-dojo.lab` を持てば 403 `PILOT_LAB_PROTECTED` で拒否する
   （`lab/protect.ts`。判定はラベルだけで、通常のリソースは従来どおり。名前・短縮 ID の指定も inspect で解決してから判定し、
   以後は確かめた完全な ID で操作する）：
   - `POST /api/network/exec`、`DELETE /api/docker/containers/:id`、`POST /api/docker/containers/:id/stop`・`start`
-  - `POST /api/network/lab/create`（固定名 `network-node-<i>` の既存コンテナ削除。何も作らないうちに拒否する）
+  - `POST /api/network/lab/create`（固定名 `network-node-<i>` の既存コンテナ削除。何も作らないうちに拒否する）。
+    指定した名前のネットワークが既にあれば、名前の完全一致とラベル `cloud-dojo=network-lab` を確かめた場合だけ再利用する。
+    パイロットのラベルがあれば 403、ラボ用だと確かめられなければ 409 `LAB_NETWORK_UNVERIFIED` で、何も作成・削除しない
   - `DELETE /api/network/lab/cleanup`（ラベル `cloud-dojo=network-lab` の一括削除。対象に1つでもあれば何も削除せずに拒否する）
   - compose（`POST /api/compose/up` の同名コンテナ削除、`/api/compose/down`・`down-volumes` のコンテナ・ネットワーク削除。
-    キューのジョブが失敗として終わる）
+    どちらもキューのジョブが失敗として終わる。up は、保護したサービスを作り直さず、他のサービスの起動は従来どおり続けたうえで
+    ジョブを失敗にする）
+  - CI/CD の real 実行（`POST /api/cicd/run` の `executionMode: real`）：許可パターン（`echo …`、`node`・`npm`・`pnpm`・
+    `docker`・`git` の `--version`、`ls`、`pwd`、`date`、`whoami`）と引数まで完全に一致する行だけを、シェルを介さずに
+    （execFile）実行する。シェルのメタ文字（`; & | $ ( ) < >`、バッククォート、改行、バックスラッシュ）を含む行は実行せずに
+    ステップを失敗させる。docker は `docker --version` だけなので、この経路でラボを停止・削除することはできない
   ログの取得（読み取り）は拒否しない。Docker を直接操作（docker CLI 等）した場合の干渉は防げない。
 
 - Node 22.5 以上が必要（`node:sqlite` を使う）。保存先の既定は `backend/api/.data/pilot.sqlite`（git 管理外）。

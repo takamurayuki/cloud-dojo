@@ -37,6 +37,45 @@ export interface ComposeSession {
   }>;
   startTime: Date;
   error?: string;
+  /** パイロットのラボ（ラベル cloud-dojo.lab）のため停止・削除を拒否したサービス名。1つでもあればジョブは失敗にする */
+  protectedRejections?: string[];
+}
+
+/** compose-up ジョブの入力（queue.ts の ComposeUpTask と同じ形） */
+export interface ComposeUpJobData {
+  composeYaml: string;
+  projectName?: string;
+}
+
+/**
+ * compose-up ジョブの本体（workers.ts の Worker から呼ぶ。キューを使わずに試験できるよう分けてある）。
+ * 同名の既存コンテナがパイロットのラボだったために停止・削除を拒否したサービスがあれば、ジョブを失敗させる
+ * （以前はサービスごとのエラーとして記録するだけで success:true を返していた）。
+ * それ以外のサービスのエラーの扱い（ジョブは成功のまま、session に記録）は従来どおり。
+ */
+export async function runComposeUpJob(
+  service: Pick<DockerComposeService, 'composeUp'>,
+  data: ComposeUpJobData,
+  updateProgress: (p: number) => Promise<void> | void = () => undefined,
+) {
+  const { composeYaml, projectName } = data;
+  try {
+    await updateProgress(10);
+    const session = await service.composeUp(composeYaml, projectName);
+    if (session.protectedRejections && session.protectedRejections.length > 0) {
+      const detail = session.protectedRejections.map((name) => `${name}: ${session.services[name]?.error ?? ''}`).join('; ');
+      throw new Error(`パイロットのラボを保護するため、次のサービスの既存コンテナを停止・削除せずに中止しました（${detail}）`);
+    }
+    await updateProgress(100);
+    return {
+      success: true,
+      projectName,
+      sessionId: session.id,
+      message: 'Compose project started successfully',
+    };
+  } catch (error) {
+    throw new Error(`Compose up failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export class DockerComposeService extends EventEmitter {
@@ -466,6 +505,7 @@ export class DockerComposeService extends EventEmitter {
           console.error(`❌ Failed to start service ${serviceName}:`, error.message);
           session.services[serviceName].status = 'error';
           session.services[serviceName].error = error.message;
+          if (error instanceof PilotLabProtectedError) (session.protectedRejections ??= []).push(serviceName);
           this.emit('update', session);
           // Continue with other services instead of throwing
         }

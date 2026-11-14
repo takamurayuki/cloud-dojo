@@ -123,9 +123,19 @@ export interface LabCleanupState {
   remaining?: string[];
 }
 
-/** 後始末中が続く場合の復旧手順（README への導線） */
-export const LAB_CLEANUP_RECOVERY =
-  '復旧手順：API プロセスを再起動し（pnpm run dev:pilot を止めて起動し直す）、そのあと「リセット」または「ラボで実行（実測）」を押すと、ラベル付きのラボが全て片付きます（詳細は backend/api/src/pilot/README.md の「後始末中が続く場合」）。';
+/** 後始末中が続く場合の案内（手順そのものは画面の「復旧手順」（LAB_CLEANUP_RECOVERY_STEPS）を開いて読む） */
+export const LAB_CLEANUP_RECOVERY = '下の「復旧手順」を開いて対処してください。';
+
+/**
+ * 後始末中が続く場合の復旧手順。backend/api/src/pilot/README.md「後始末中が続く場合」と同じ内容。
+ * 「リセット」は削除だけを行い、「ラボで実行（実測）」は削除のあとに実測用のラボを新しく起動する（実挙動どおりに書く）。
+ */
+export const LAB_CLEANUP_RECOVERY_STEPS: string[] = [
+  'API プロセスを再起動する（pnpm run dev:pilot を止めて起動し直す）。後始末中の状態はプロセス内にだけあるので、これで解除される。',
+  '「リセット」を押す。前のプロセスのものを含め、ラベル cloud-dojo.lab の付いたラボのコンテナ・ネットワークを全て削除する（ラボは停止したままになる。続けて使うときは「起動」）。',
+  '「リセット」の代わりに「ラボで実行（実測）」でもよい。同じ削除を行ったあと、実測用のラボを新しく起動して実測する（実測後もそのラボは起動したまま残る）。',
+  'それでも残る場合は Docker を直接確認する：docker ps -a --filter label=cloud-dojo.lab ／ docker network ls --filter label=cloud-dojo.lab',
+];
 
 /** 後始末中（LAB_CLEANUP_PENDING）の表示用の文 */
 export function cleanupPendingHint(s: LabCleanupState | null | undefined): string {
@@ -134,7 +144,7 @@ export function cleanupPendingHint(s: LabCleanupState | null | undefined): strin
   if (s?.remaining && s.remaining.length > 0) {
     return `${op}の後始末で、削除を確認できなかったリソースがあります（${s.remaining.join(' / ')}）。待っても解除されません。${LAB_CLEANUP_RECOVERY}`;
   }
-  return `${op}の後始末が続いています。通常は終わりしだい解除されるので、しばらく待ってから再試行してください。長く続く場合の${LAB_CLEANUP_RECOVERY}`;
+  return `${op}の後始末が続いています。通常は終わりしだい解除されるので、しばらく待ってから再試行してください。長く続く場合は${LAB_CLEANUP_RECOVERY}`;
 }
 
 export class ApiError extends Error {
@@ -143,6 +153,8 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public hint?: string,
+    /** 後始末中が続く場合の復旧手順（LAB_CLEANUP_RECOVERY_STEPS）を表示するか */
+    public recovery = false,
   ) {
     super(message);
   }
@@ -163,7 +175,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   if (!res.ok) {
     // 409 LAB_CLEANUP_PENDING の cleanup は後始末中の状態（LabCleanupState）、504 LAB_TIMEOUT の cleanup は後始末の結果
     const hint = data.hint ?? (data.error === 'LAB_CLEANUP_PENDING' ? cleanupPendingHint(data.cleanup) : cleanupHint(data.cleanup));
-    throw new ApiError(res.status, data.error ?? 'ERROR', data.message ?? data.error ?? res.statusText, hint);
+    const recovery = data.error === 'LAB_CLEANUP_PENDING' || Boolean(data.cleanup?.pending || data.cleanup?.remaining?.length);
+    throw new ApiError(res.status, data.error ?? 'ERROR', data.message ?? data.error ?? res.statusText, hint, recovery);
   }
   return data as T;
 }
@@ -188,7 +201,7 @@ function cleanupHint(c: CleanupResult | null | undefined): string | undefined {
   if (c.remaining && c.remaining.length > 0) {
     return `ラボの後始末で、削除を確認できなかったリソースがあります（${counts}）：${[...c.remaining, ...errors].join(' / ')}。待っても解除されず、このままではラボを操作できません。${LAB_CLEANUP_RECOVERY}`;
   }
-  if (c.pending) return `ラボの後始末が期限内に終わらず、まだ続いています（ここまで：${counts}）。終わるまでラボの操作はできません。しばらく待ってから再試行してください。長く続く場合の${LAB_CLEANUP_RECOVERY}`;
+  if (c.pending) return `ラボの後始末が期限内に終わらず、まだ続いています（ここまで：${counts}）。終わるまでラボの操作はできません。しばらく待ってから再試行してください。長く続く場合は${LAB_CLEANUP_RECOVERY}`;
   return c.ok ? `ラボのコンテナを停止・削除しました（${counts}）。` : `ラボの後始末に失敗した箇所があります（${counts}）：${errors.join(' / ')}`;
 }
 

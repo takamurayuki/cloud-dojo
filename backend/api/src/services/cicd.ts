@@ -1,11 +1,12 @@
 import { EventEmitter } from 'events';
 import * as yaml from 'js-yaml';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { checkRealCommand, sanitizeStepEnv } from './cicd-command';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface WorkflowStep {
   name: string;
@@ -435,31 +436,25 @@ export class CICDService extends EventEmitter {
     // In real mode, execute safe commands
     console.log(`⚡ Attempting real execution: ${command}`);
     
-    // Whitelist of safe commands to actually execute
-    const safeCommands = [
-      'echo',
-      'node --version',
-      'npm --version',
-      'pnpm --version',
-      'docker --version',
-      'git --version',
-      'ls',
-      'pwd',
-      'date',
-      'whoami',
-    ];
+    // 許可パターンとの完全一致だけを実行する（cicd-command.ts）。シェルのメタ文字を含むものは実行せずにステップを失敗させる。
+    // 実行は execFile（シェルを介さない）で、コマンドと引数を分けて渡す
+    const check = checkRealCommand(command);
 
-    const isSafeCommand = safeCommands.some(safe => command.startsWith(safe));
+    if (check.kind === 'rejected') {
+      console.log(`⛔ Rejected in real mode: ${command}`);
+      throw new Error(check.reason);
+    }
 
-    if (isSafeCommand) {
+    if (check.kind === 'allowed') {
       try {
-        console.log(`✅ Executing real command: ${command}`);
-        const { stdout, stderr } = await execAsync(command, {
+        console.log(`✅ Executing real command: ${check.command.file} ${JSON.stringify(check.command.args)}`);
+        const { stdout, stderr } = await execFileAsync(check.command.file, check.command.args, {
           cwd: this.workspaceDir,
-          env: { ...process.env, ...env },
+          env: { ...process.env, ...sanitizeStepEnv(env) },
           timeout: 30000, // 30 second timeout
+          shell: false,
         });
-        return { stdout, stderr };
+        return { stdout: String(stdout), stderr: String(stderr) };
       } catch (error: any) {
         console.log(`⚠️  Real command failed, falling back to simulation: ${error.message}`);
         // If command fails, fall back to simulation

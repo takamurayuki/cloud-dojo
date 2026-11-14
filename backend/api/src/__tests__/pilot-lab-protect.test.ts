@@ -58,6 +58,8 @@ const stub = vi.hoisted(() => {
       },
     }),
     createNetwork: async (o: { Name: string }) => {
+      // 実際の Docker と同じく、同名のネットワークがあれば 409
+      if (Object.values(networks).some((n) => n.Name === o.Name)) throw Object.assign(new Error('network exists'), { statusCode: 409 });
       calls.createNetwork.push(o.Name);
       return { id: `net-${o.Name}` };
     },
@@ -297,5 +299,91 @@ describe('直し回3：compose の削除経路もラベルで拒否する', () =
     expect(stub.calls.stop).toEqual(['plainproj0001']);
     expect(stub.calls.remove).toEqual(['plainproj0001']);
     expect(stub.calls.removeNetwork).toEqual(['projnet0001']);
+  });
+});
+
+const COMPOSE_YAML = `version: '3.8'
+services:
+  web:
+    image: nginx
+  db:
+    image: postgres
+`;
+
+describe('直し回4（推奨A）：compose up の保護拒否をジョブ失敗にする', () => {
+  it('同名の既存コンテナがパイロットのラボなら、停止・削除せず、ジョブ（runComposeUpJob）は失敗する', async () => {
+    const { composeService, runComposeUpJob } = await import('../services/compose');
+    stub.containers['dual0000000005'] = { Id: 'dual0000000005', Name: '/proj_web', Labels: { 'cloud-dojo.lab': 'n5-tcp' } };
+    const silence = [vi.spyOn(console, 'log').mockImplementation(() => undefined), vi.spyOn(console, 'error').mockImplementation(() => undefined)];
+    const progress: number[] = [];
+    await expect(runComposeUpJob(composeService, { composeYaml: COMPOSE_YAML, projectName: 'proj' }, (p) => void progress.push(p))).rejects.toThrow(
+      /Compose up failed: .*パイロットのラボ.*web/,
+    );
+    silence.forEach((s) => s.mockRestore());
+    expect(stub.calls.stop).toHaveLength(0);
+    expect(stub.calls.remove).toHaveLength(0);
+    // 保護対象のサービスは作り直さない。他のサービス（db）は従来どおり起動する
+    expect(stub.calls.create).toEqual(['proj_db']);
+    expect(progress).not.toContain(100);
+  });
+
+  it('パイロットのラベルが無ければ従来どおり既存コンテナを削除して起動し、ジョブは success:true', async () => {
+    const { composeService, runComposeUpJob } = await import('../services/compose');
+    stub.containers['plainweb0001'] = { Id: 'plainweb0001', Name: '/proj_web', Labels: {} };
+    const silence = [vi.spyOn(console, 'log').mockImplementation(() => undefined), vi.spyOn(console, 'error').mockImplementation(() => undefined)];
+    const r = await runComposeUpJob(composeService, { composeYaml: COMPOSE_YAML, projectName: 'proj' });
+    silence.forEach((s) => s.mockRestore());
+    expect(r.success).toBe(true);
+    expect(stub.calls.stop).toEqual(['plainweb0001']);
+    expect(stub.calls.remove).toEqual(['plainweb0001']);
+    expect(stub.calls.create).toEqual(['proj_web', 'proj_db']);
+  });
+});
+
+describe('直し回4（推奨B）：/lab/create は既存の同名ネットワークをラベルで確かめてから再利用する', () => {
+  const create = (networkName = 'lab-network') =>
+    app.inject({ method: 'POST', url: '/api/network/lab/create', payload: { nodeCount: 2, networkName } });
+
+  it('ラボ用のラベル（cloud-dojo=network-lab）が無い同名ネットワークには接続せず 409、何も作成・削除しない', async () => {
+    stub.networks['othernet0001'] = { Id: 'othernet0001', Name: 'lab-network', Labels: { app: 'something-else' } };
+    stub.containers['oldnode00001'] = { Id: 'oldnode00001', Name: '/network-node-1', Labels: { 'cloud-dojo': 'network-lab' } };
+    const r = await create();
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toBe('LAB_NETWORK_UNVERIFIED');
+    expect(stub.calls.createNetwork).toHaveLength(0);
+    expect(stub.calls.create).toHaveLength(0);
+    expect(stub.calls.remove).toHaveLength(0);
+  });
+
+  it('パイロットのラベルを持つ同名ネットワークには接続せず 403、何も作成・削除しない', async () => {
+    stub.networks['dualnet0003'] = { Id: 'dualnet0003', Name: 'lab-network', Labels: { 'cloud-dojo': 'network-lab', 'cloud-dojo.lab': 'n5-tcp' } };
+    const r = await create();
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe('PILOT_LAB_PROTECTED');
+    expect(stub.calls.createNetwork).toHaveLength(0);
+    expect(stub.calls.create).toHaveLength(0);
+  });
+
+  it('ID の接頭辞で別名のネットワークに解決された場合（名前が一致しない）も接続しない', async () => {
+    stub.networks['labnetwork-xyz'] = { Id: 'labnetwork-xyz', Name: 'unrelated', Labels: { 'cloud-dojo': 'network-lab' } };
+    const r = await create('labnetwork');
+    expect(r.statusCode).toBe(409);
+    expect(stub.calls.create).toHaveLength(0);
+  });
+
+  it('ラボ用の同名ネットワークは従来どおり再利用し（作り直さない）、確かめた ID を返す', async () => {
+    stub.networks['labnet0009'] = { Id: 'labnet0009', Name: 'lab-network', Labels: { 'cloud-dojo': 'network-lab' } };
+    const r = await create();
+    expect(r.statusCode).toBe(200);
+    expect(r.json().networkId).toBe('labnet0009');
+    expect(stub.calls.createNetwork).toHaveLength(0);
+    expect(stub.calls.create).toEqual(['network-node-1', 'network-node-2']);
+  });
+
+  it('同名ネットワークが無ければ従来どおり作成する', async () => {
+    const r = await create();
+    expect(r.statusCode).toBe(200);
+    expect(stub.calls.createNetwork).toEqual(['lab-network']);
+    expect(r.json().networkId).toBe('net-lab-network');
   });
 });
