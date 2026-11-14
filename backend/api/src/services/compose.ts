@@ -1,6 +1,7 @@
 import Docker from 'dockerode';
 import { EventEmitter } from 'events';
 import { isNotFound, isPilotLabLabels, PilotLabProtectedError } from '../pilot/lab/protect';
+import { ComposeDefinitionRejectedError, inspectBinds, inspectComposeDefinition, type ComposeViolation } from './compose-guard';
 
 const docker = new Docker();
 
@@ -103,6 +104,49 @@ export interface ComposeSession {
   protectedRejections?: string[];
   /** 既存の同名ネットワークを compose 用と確かめられず、接続しなかった理由。あればジョブは失敗にする（直し回4補足2） */
   networkRejection?: string;
+  /** compose 定義がホストを操作できる設定を含むため、作成を開始せずに拒否した理由。あればジョブは失敗にする（直し回5） */
+  definitionRejection?: string;
+  /**
+   * ネットワークの準備の途中で失敗したときの後始末の結果（直し回5 推奨B）。この回に作成したネットワークだけを、
+   * 作成時の ID で削除する。削除できなかったもの（remaining）があればジョブは失敗にし、残存を明示する
+   */
+  networkRollback?: { removed: { name: string; id: string }[]; remaining: { name: string; id: string; error: string }[] };
+}
+
+/**
+ * サービスの volumes（この API のパーサの結果）から、HostConfig.Binds に入れるものと、作成を確かめる名前付きボリュームを求める。
+ * 作成前の検査（inspectBinds）と実際のコンテナ設定の両方でこれを使い、検査したものと Docker に渡すものを一致させる。
+ */
+export function planVolumes(projectName: string, volumes: string[] | undefined): { binds: string[]; namedVolumes: string[] } {
+  const binds: string[] = [];
+  const namedVolumes: string[] = [];
+  for (const volStr of volumes ?? []) {
+    const [host, container] = volStr.split(':');
+    if (host && container) {
+      // Check if it's a named volume
+      if (!host.startsWith('/') && !host.startsWith('.')) {
+        namedVolumes.push(`${projectName}_${host}`);
+        binds.push(`${projectName}_${host}:${container}`);
+      } else {
+        binds.push(volStr);
+      }
+    }
+  }
+  return { binds, namedVolumes };
+}
+
+/**
+ * 作成前の検査（直し回5 必須）：YAML として解析した定義と、この API のパーサが Docker に渡す bind mount の両方を調べる。
+ * ホストを操作できる設定があれば ComposeDefinitionRejectedError を投げる。
+ */
+export function assertComposeDefinitionSafe(composeYaml: string, config: ComposeConfig, projectName: string): void {
+  const violations: ComposeViolation[] = inspectComposeDefinition(composeYaml);
+  for (const [name, service] of Object.entries(config.services)) {
+    for (const v of inspectBinds(name, planVolumes(projectName, service.volumes).binds)) {
+      if (!violations.some((x) => x.service === v.service && x.field === v.field && x.detail === v.detail)) violations.push(v);
+    }
+  }
+  if (violations.length > 0) throw new ComposeDefinitionRejectedError(violations);
 }
 
 /** compose-up ジョブの入力（queue.ts の ComposeUpTask と同じ形） */
@@ -126,7 +170,16 @@ export async function runComposeUpJob(
   try {
     await updateProgress(10);
     const session = await service.composeUp(composeYaml, projectName);
+    if (session.definitionRejection) throw new Error(session.definitionRejection);
     if (session.networkRejection) throw new Error(session.networkRejection);
+    const remaining = session.networkRollback?.remaining ?? [];
+    if (remaining.length > 0) {
+      throw new Error(
+        `ネットワークの準備の途中で失敗し、この回に作成したネットワークを削除できませんでした（残存：${remaining
+          .map((r) => `${r.name} ${r.id}: ${r.error}`)
+          .join('; ')}）。元の失敗：${session.error ?? '不明'}`,
+      );
+    }
     if (session.protectedRejections && session.protectedRejections.length > 0) {
       const detail = session.protectedRejections.map((name) => `${name}: ${session.services[name]?.error ?? ''}`).join('; ');
       throw new Error(`パイロットのラボを保護するため、次のサービスの既存コンテナを停止・削除せずに中止しました（${detail}）`);
@@ -141,6 +194,18 @@ export async function runComposeUpJob(
   } catch (error) {
     throw new Error(`Compose up failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function describeRollback(r: NonNullable<ComposeSession['networkRollback']>): string {
+  const parts: string[] = [];
+  if (r.removed.length > 0) parts.push(`この回に作成したネットワーク ${r.removed.map((n) => n.name).join(', ')} は削除しました`);
+  if (r.remaining.length > 0) {
+    parts.push(
+      `この回に作成したネットワーク ${r.remaining.map((n) => `${n.name}（${n.id}）`).join(', ')} は削除できず残っています` +
+        `（docker network rm ${r.remaining.map((n) => n.id).join(' ')} で削除してください）`,
+    );
+  }
+  return parts.join('。');
 }
 
 export class DockerComposeService extends EventEmitter {
@@ -387,6 +452,22 @@ export class DockerComposeService extends EventEmitter {
     }
 
     this.sessions.set(sessionId, session);
+
+    // ホストを操作できる設定（Docker ソケットの bind mount、privileged、host 名前空間、許可外の cap_add 等）を含む定義は、
+    // Docker への操作を何もしないうちに拒否する（直し回5 必須）
+    try {
+      assertComposeDefinitionSafe(composeYaml, config, projectName);
+    } catch (error) {
+      if (!(error instanceof ComposeDefinitionRejectedError)) throw error;
+      console.error(`⛔ ${error.message}`);
+      session.status = 'error';
+      session.error = error.message;
+      session.definitionRejection = error.message;
+      for (const name of Object.keys(session.services)) session.services[name].status = 'error';
+      this.emit('update', session);
+      return session;
+    }
+
     this.emit('update', session);
 
     try {
@@ -397,42 +478,50 @@ export class DockerComposeService extends EventEmitter {
       // Create network if needed
       // 既存の同名ネットワークは、compose 用のラベルを確かめてから接続する（直し回4補足2）。先に全件を確かめ、
       // 1つでも確かめられなければ、ネットワーク・コンテナを何も作成・停止・削除せずに中止する
+      // 接続には確かめた（または作成した）ネットワークの ID を使う（直し回5 推奨A：確認後に同名の別ネットワークへ付け替わっても誤接続しない）。
+      // この回に作成したものは ID を記録し、準備の途中で失敗したら削除する（直し回5 推奨B）
+      const networkIds: Record<string, string> = {};
       if (config.networks && Object.keys(config.networks).length > 0) {
         const networkNames = Object.keys(config.networks);
-        const missing: string[] = [];
+        const created: { name: string; id: string }[] = [];
         try {
+          const missing: string[] = [];
           for (const networkName of networkNames) {
-            if (!(await resolveComposeNetwork(projectName, networkName))) missing.push(networkName);
+            const found = await resolveComposeNetwork(projectName, networkName);
+            if (found) networkIds[networkName] = found.id;
+            else missing.push(networkName);
           }
-        } catch (error) {
-          if (error instanceof ComposeNetworkUnverifiedError || error instanceof PilotLabProtectedError) {
-            session.networkRejection = error.message;
-          }
-          throw error;
-        }
-        for (const networkName of missing) {
-          try {
-            await docker.createNetwork({
-              Name: `${projectName}_${networkName}`,
-              Driver: 'bridge',
-              Labels: {
-                [COMPOSE_NETWORK_LABEL]: COMPOSE_NETWORK_LABEL_VALUE,
-                [COMPOSE_PROJECT_LABEL]: projectName,
-                [COMPOSE_NETWORK_NAME_LABEL]: networkName,
-              },
-            });
-          } catch (error) {
-            // 確認の後に同名のネットワークが作られた場合（409）も、同じ確認を通ったものだけ使う
-            if ((error as { statusCode?: number } | null)?.statusCode !== 409) throw error;
+          for (const networkName of missing) {
+            const fullName = `${projectName}_${networkName}`;
             try {
-              if (!(await resolveComposeNetwork(projectName, networkName))) throw error;
-            } catch (recheckError) {
-              if (recheckError instanceof ComposeNetworkUnverifiedError || recheckError instanceof PilotLabProtectedError) {
-                session.networkRejection = recheckError.message;
-              }
-              throw recheckError;
+              const network = await docker.createNetwork({
+                Name: fullName,
+                Driver: 'bridge',
+                Labels: {
+                  [COMPOSE_NETWORK_LABEL]: COMPOSE_NETWORK_LABEL_VALUE,
+                  [COMPOSE_PROJECT_LABEL]: projectName,
+                  [COMPOSE_NETWORK_NAME_LABEL]: networkName,
+                },
+              });
+              created.push({ name: fullName, id: network.id });
+              networkIds[networkName] = network.id;
+            } catch (error) {
+              // 確認の後に同名のネットワークが作られた場合（409）も、同じ確認を通ったものだけ使う
+              if ((error as { statusCode?: number } | null)?.statusCode !== 409) throw error;
+              const found = await resolveComposeNetwork(projectName, networkName);
+              if (!found) throw error;
+              networkIds[networkName] = found.id;
             }
           }
+        } catch (error) {
+          const rollback = await this.rollbackCreatedNetworks(created);
+          const rollbackNote = created.length > 0 ? `。${describeRollback(rollback)}` : '';
+          if (error instanceof ComposeNetworkUnverifiedError || error instanceof PilotLabProtectedError) {
+            session.networkRejection = error.message + rollbackNote;
+          }
+          if (created.length > 0) session.networkRollback = rollback;
+          if (error instanceof Error && rollbackNote) error.message += rollbackNote;
+          throw error;
         }
       }
 
@@ -481,8 +570,8 @@ export class DockerComposeService extends EventEmitter {
             HostConfig: {
               PortBindings: {},
               Binds: [],
-              NetworkMode: config.networks 
-                ? `${projectName}_${Object.keys(config.networks)[0]}` 
+              NetworkMode: config.networks
+                ? networkIds[Object.keys(config.networks)[0]]
                 : 'bridge'
             }
           };
@@ -523,25 +612,18 @@ export class DockerComposeService extends EventEmitter {
             }
           }
 
-          // Volumes
+          // Volumes（作成前の検査と同じ planVolumes の結果を渡す）
           if (service.volumes) {
-            for (const volStr of service.volumes) {
-              const [host, container] = volStr.split(':');
-              if (host && container) {
-                // Check if it's a named volume
-                if (!host.startsWith('/') && !host.startsWith('.')) {
-                  // Named volume - ensure it exists
-                  try {
-                    await docker.getVolume(`${projectName}_${host}`).inspect();
-                  } catch {
-                    await docker.createVolume({ Name: `${projectName}_${host}` });
-                  }
-                  containerConfig.HostConfig.Binds.push(`${projectName}_${host}:${container}`);
-                } else {
-                  containerConfig.HostConfig.Binds.push(volStr);
-                }
+            const { binds, namedVolumes } = planVolumes(projectName, service.volumes);
+            for (const volumeName of namedVolumes) {
+              // Named volume - ensure it exists
+              try {
+                await docker.getVolume(volumeName).inspect();
+              } catch {
+                await docker.createVolume({ Name: volumeName });
               }
             }
+            containerConfig.HostConfig.Binds.push(...binds);
           }
 
           // Check if image exists
@@ -657,6 +739,27 @@ export class DockerComposeService extends EventEmitter {
     }
 
     return session;
+  }
+
+  /** この回に作成したネットワークを、作成時の ID で削除する。削除できなかったものは残存として返し、ログにも出す */
+  private async rollbackCreatedNetworks(created: { name: string; id: string }[]): Promise<NonNullable<ComposeSession['networkRollback']>> {
+    const result: NonNullable<ComposeSession['networkRollback']> = { removed: [], remaining: [] };
+    for (const n of created) {
+      try {
+        await docker.getNetwork(n.id).remove();
+        result.removed.push(n);
+      } catch (error) {
+        if (isNotFound(error)) {
+          result.removed.push(n);
+          continue;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        result.remaining.push({ ...n, error: message });
+        console.error(`⚠️ 作成したネットワーク ${n.name}（${n.id}）を削除できず、残っています: ${message}`);
+      }
+    }
+    if (result.removed.length > 0) console.log(`🧹 作成途中で失敗したため、この回に作成したネットワークを削除しました: ${result.removed.map((n) => n.name).join(', ')}`);
+    return result;
   }
 
   async composeDown(projectName: string = 'cloud-dojo'): Promise<void> {

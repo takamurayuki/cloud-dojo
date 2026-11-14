@@ -54,7 +54,11 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   - `POST /api/network/exec`、`DELETE /api/docker/containers/:id`、`POST /api/docker/containers/:id/stop`・`start`
   - `POST /api/network/lab/create`（固定名 `network-node-<i>` の既存コンテナ削除。何も作らないうちに拒否する）。
     指定した名前のネットワークが既にあれば、名前の完全一致とラベル `cloud-dojo=network-lab` を確かめた場合だけ再利用する。
-    パイロットのラベルがあれば 403、ラボ用だと確かめられなければ 409 `LAB_NETWORK_UNVERIFIED` で、何も作成・削除しない
+    パイロットのラベルがあれば 403、ラボ用だと確かめられなければ 409 `LAB_NETWORK_UNVERIFIED`。どちらも作成前の確認で拒否するので、
+    何も作成・削除しない。コンテナは確かめた（または作成した）ネットワークの ID で接続する（名前では接続しない）。
+    確認を通った後の作成途中で失敗した場合（500）は、その要求で作成したネットワークがあれば、その要求で作成したコンテナと
+    そのネットワークを ID で削除する。削除できなかったものは応答の `cleanup.remaining` とログに残存として出す
+    （再利用した既存のネットワークは削除しない。作り直しのために削除した既存の `network-node-<i>` は戻らない）
   - `DELETE /api/network/lab/cleanup`（ラベル `cloud-dojo=network-lab` の一括削除。対象に1つでもあれば何も削除せずに拒否する）
   - compose（`POST /api/compose/up` の同名コンテナ削除、`/api/compose/down`・`down-volumes` のコンテナ・ネットワーク削除。
     どちらもキューのジョブが失敗として終わる。up は、保護したサービスを作り直さず、他のサービスの起動は従来どおり続けたうえで
@@ -62,8 +66,25 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     このプロジェクトの compose ネットワークのラベル（この API が作成時に付ける `cloud-dojo=compose`・
     `cloud-dojo.compose.project`・`cloud-dojo.compose.network`、または Docker Compose が付ける `com.docker.compose.project`・
     `com.docker.compose.network`）を確かめた場合だけ接続する。確かめられなければ（パイロットのラベル、`cloud-dojo=network-lab`
-    等の別用途、ラベル無しを含む）ネットワーク・コンテナを何も作成・停止・削除せずにジョブを失敗にする。
+    等の別用途、ラベル無しを含む）ジョブを失敗にする。全ネットワークを作成前にまとめて確かめるので、その確認で拒否した場合は
+    ネットワーク・コンテナを何も作成・停止・削除しない。確認の後、ネットワークの作成途中で失敗した場合（作成中の 409 の
+    再確認で拒否した等）は、コンテナは作らず、この回に作成したネットワークを作成時の ID で削除する。削除できなかったものは
+    ジョブの失敗理由とログに残存として出す。コンテナは確かめた（または作成した）ネットワークの ID で接続する（名前では接続しない）。
     以前の版が作ったラベル無しのネットワークは、一度 `docker network rm <project>_<network>` で削除すると次回から作り直される
+  - compose の定義（`POST /api/compose/up`）：ホストを操作できる設定を含む定義は、受付時に 400 `COMPOSE_DEFINITION_REJECTED`
+    で拒否してキューに入れない。Worker 側の compose up でも同じ検査をし、Docker を何も操作しないうちにジョブを失敗にする。
+    拒否するのは次の5つ（判定は YAML の解析結果と、この API が実際に Docker へ渡す bind mount に対して行う。パスは `..`・
+    重複・末尾スラッシュを正規化し、ホストに存在する部分はシンボリックリンクを解決した実体で比べる）：
+    1. Docker ソケットの bind mount（`/var/run/docker.sock`・`/run/docker.sock`・`DOCKER_HOST` 等。別名・リンク・同じ inode、
+       ソケットを含む親ディレクトリ（`/`・`/run`・`/var/run`・`/var` 等）、名前が `docker.sock` のもの、Windows の
+       `docker_engine` パイプを含む。名前付きボリュームの `driver_opts.device`、`secrets`／`configs` の `file` も同じ）
+    2. `privileged: true`
+    3. host 名前空間の共有（`network_mode`・`pid`・`ipc`・`uts`・`userns_mode`・`cgroup` が `host` または `container:…`）
+    4. `cap_add` のうち許可リスト外のもの（`ALL`・`SYS_ADMIN` 等）。許可するのは Docker の既定14個と `NET_ADMIN`・
+       `SYS_PTRACE`・`IPC_LOCK`・`SYS_NICE`（`services/compose-guard.ts` の `ALLOWED_CAP_ADD`）
+    5. `devices`
+    任意のイメージ・command・名前付きボリューム・上記以外のホストパス・ポート・環境変数は従来どおり使える。
+    YAML として解析できない定義も、判定できないため拒否する
   - Kubernetes（`/api/k8s/*`）：namespace・name・kind・tail を Kubernetes の名前の規則（RFC 1123 等）で検証し、
     妥当でなければ 400 `K8S_INVALID_INPUT` で kubectl を起動しない。kubectl はシェルを介さず（execFile）引数を分けて起動する
   - CI/CD の real 実行（`POST /api/cicd/run` の `executionMode: real`）：許可パターン（`echo …`、`node`・`npm`・`pnpm`・

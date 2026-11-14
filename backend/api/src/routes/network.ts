@@ -72,9 +72,33 @@ async function resolveReusableLabNetwork(name: string): Promise<Docker.Network |
   return docker.getNetwork(info.Id);
 }
 
+/** /lab/create の作成途中の失敗の後始末：この要求で作成したコンテナ、次にネットワークを ID で削除する */
+async function rollbackLabCreate(
+  network: { name: string; id: string },
+  containerIds: string[],
+): Promise<{ removed: string[]; remaining: { kind: 'container' | 'network'; id: string; error: string }[] }> {
+  const removed: string[] = [];
+  const remaining: { kind: 'container' | 'network'; id: string; error: string }[] = [];
+  const attempt = async (kind: 'container' | 'network', id: string, op: () => Promise<unknown>) => {
+    try {
+      await op();
+      removed.push(id);
+    } catch (error) {
+      if (isNotFound(error)) removed.push(id);
+      else remaining.push({ kind, id, error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+  for (const id of containerIds) await attempt('container', id, () => docker.getContainer(id).remove({ force: true }));
+  await attempt('network', network.id, () => docker.getNetwork(network.id).remove());
+  return { removed, remaining };
+}
+
 export async function networkRoutes(fastify: FastifyInstance) {
   // ネットワークラボ環境を作成
   fastify.post('/lab/create', async (request, reply) => {
+    // この要求で作成したネットワーク・コンテナの ID（作成途中で失敗したときの後始末に使う。直し回5 推奨B）
+    let createdNetwork: { name: string; id: string } | null = null;
+    const createdContainers: string[] = [];
     try {
       // Docker起動状態を確認
       const dockerStatus = await checkDockerStatus();
@@ -138,6 +162,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
               'cloud-dojo': 'network-lab',
             },
           });
+          createdNetwork = { name: networkName, id: network.id };
         } catch (error: any) {
           // 確認の後に同名のネットワークが作られた場合（409）も、同じ確認を通ったものだけ再利用する
           if (error.statusCode === 409) {
@@ -149,6 +174,10 @@ export async function networkRoutes(fastify: FastifyInstance) {
           }
         }
       }
+
+      // 接続には確かめた（または作成した）ネットワークの ID を使う（直し回5 推奨A：確認後に同名の別ネットワークへ
+      // 付け替わっても誤接続しない。確かめたものが消えていれば作成が失敗する）
+      const networkId: string = network.id;
 
       // 複数のLinuxコンテナを作成
       const containers = [];
@@ -173,7 +202,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
           Tty: true,
           OpenStdin: true,
           HostConfig: {
-            NetworkMode: networkName,
+            NetworkMode: networkId,
             CapAdd: ['NET_ADMIN', 'NET_RAW'], // ネットワーク管理権限
           },
           Labels: {
@@ -182,13 +211,16 @@ export async function networkRoutes(fastify: FastifyInstance) {
           },
         });
 
+        createdContainers.push(container.id);
+
         await container.start();
 
         const inspectData = await container.inspect();
+        const attached = inspectData.NetworkSettings.Networks ?? {};
         containers.push({
           id: container.id,
           name: containerName,
-          ipAddress: inspectData.NetworkSettings.Networks[networkName]?.IPAddress,
+          ipAddress: (attached[networkName] ?? Object.values(attached).find((n) => n?.NetworkID === networkId))?.IPAddress,
           nodeId: i,
         });
       }
@@ -203,9 +235,16 @@ export async function networkRoutes(fastify: FastifyInstance) {
       if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       if (error instanceof LabNetworkUnverifiedError) return reply.code(409).send({ error: error.code, message: error.message });
       fastify.log.error({ error }, 'Failed to create network lab');
+      // この要求でネットワークを作成した後に失敗した場合は、この要求で作成したコンテナとネットワークを、作成時の ID で削除する。
+      // 削除できなかったものは応答の cleanup.remaining とログに残存として明示する（再利用した既存のネットワークは削除しない）
+      const cleanup = createdNetwork ? await rollbackLabCreate(createdNetwork, createdContainers) : undefined;
+      if (cleanup && cleanup.remaining.length > 0) {
+        fastify.log.error({ remaining: cleanup.remaining }, 'Network lab creation failed and created resources remain');
+      }
       return reply.code(500).send({
         error: 'Failed to create network lab',
         message: error instanceof Error ? error.message : 'Unknown error',
+        ...(cleanup ? { cleanup } : {}),
       });
     }
   });

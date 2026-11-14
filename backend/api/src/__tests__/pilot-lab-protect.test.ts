@@ -473,9 +473,10 @@ describe('直し回4補足2：compose up は既存の同名ネットワークを
     const res = await up();
     expect(res.ok).toBe(true);
     expect(stub.calls.createNetwork).toHaveLength(0);
+    // 直し回5 推奨A：接続は確かめたネットワークの ID で行う（以前は名前 proj_app）
     expect(stub.calls.networkMode).toEqual([
-      { name: 'proj_web', mode: 'proj_app' },
-      { name: 'proj_db', mode: 'proj_app' },
+      { name: 'proj_web', mode: 'ours0104' },
+      { name: 'proj_db', mode: 'ours0104' },
     ]);
   });
 
@@ -493,6 +494,7 @@ describe('直し回4補足2：compose up は既存の同名ネットワークを
     expect(stub.calls.createNetworkLabels).toEqual([
       { name: 'proj_app', labels: { 'cloud-dojo': 'compose', 'cloud-dojo.compose.project': 'proj', 'cloud-dojo.compose.network': 'app' } },
     ]);
-    expect(stub.calls.networkMode.map((m) => m.mode)).toEqual(['proj_app', 'proj_app']);
+    // 直し回5 推奨A：接続は作成したネットワークの ID で行う（以前は名前 proj_app。スタブの作成は ID net-<名前> を返す）
+    expect(stub.calls.networkMode.map((m) => m.mode)).toEqual(['net-proj_app', 'net-proj_app']);
   });
 });
