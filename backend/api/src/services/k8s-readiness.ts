@@ -19,6 +19,12 @@
  * - コントローラ系は Kubernetes の完了条件に合わせて厳密に判定する（必須1）。最新定義の反映
  *   （observedGeneration ≧ generation）、全体・更新済み・利用可能の数がすべて希望数と一致（旧レプリカが残っていない）、
  *   利用不可が 0 または未設定。
+ *
+ * 直し回15：
+ * - 「省略（未報告）」として扱うのはキーが無い（undefined）ときだけ。明示的な null は数値・文字列・オブジェクト・配列・
+ *   条件のいずれでも不正な型として failed（確認できない応答）にする（必須1）。
+ * - LoadBalancer の ingress は要素ごとに検証する。ip または hostname が空でない文字列の要素が無ければ pending、
+ *   要素の構造が不正なら failed（必須2）。
  */
 
 export type ReadinessState = 'ready' | 'pending' | 'failed' | 'unverifiable';
@@ -53,55 +59,140 @@ class MalformedResponse extends Error {}
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v);
 const show = (v: unknown): string => (typeof v === 'string' ? `"${v}"` : JSON.stringify(v) ?? String(v));
 
+/**
+ * 直し回15：省略（未報告）として扱うのはキーが無い（undefined）ときだけ。明示的な null は不正な型として
+ * 確認できない応答にする。途中の階層も同じで、null や非オブジェクトの途中の値は読み飛ばさない。
+ */
 function get(obj: Obj, path: string): unknown {
   let cur: unknown = obj;
+  let at = '';
   for (const key of path.split('.')) {
-    if (!isObj(cur)) return undefined;
+    if (cur === undefined) return undefined;
+    if (!isObj(cur)) throw new MalformedResponse(`${at} がオブジェクトではありません（${show(cur)}）`);
     cur = cur[key];
+    at = at ? `${at}.${key}` : key;
   }
   return cur;
 }
+
+const nullValue = (path: string) => new MalformedResponse(`${path} が null です（不正な型）`);
 
 function isCount(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0;
 }
 
-/** 必ず返される数値項目：欠落・不正な型は確認できない応答 */
+/** 必ず返される数値項目：欠落・null・不正な型は確認できない応答 */
 function reqCount(obj: Obj, path: string): number {
   const v = get(obj, path);
-  if (v === undefined || v === null) throw new MalformedResponse(`${path} がありません`);
+  if (v === undefined) throw new MalformedResponse(`${path} がありません`);
+  if (v === null) throw nullValue(path);
   if (!isCount(v)) throw new MalformedResponse(`${path} が 0 以上の整数ではありません（${show(v)}）`);
   return v;
 }
 
-/** 0 のとき省略されうる数値項目：欠落は undefined（未報告）、不正な型は確認できない応答 */
+/** 0 のとき省略されうる数値項目：キーが無ければ undefined（未報告）、null・不正な型は確認できない応答 */
 function optCount(obj: Obj, path: string): number | undefined {
   const v = get(obj, path);
-  if (v === undefined || v === null) return undefined;
+  if (v === undefined) return undefined;
+  if (v === null) throw nullValue(path);
   if (!isCount(v)) throw new MalformedResponse(`${path} が 0 以上の整数ではありません（${show(v)}）`);
   return v;
 }
 
-/** 文字列の項目：欠落は undefined、文字列以外は確認できない応答 */
+/** 文字列の項目：キーが無ければ undefined、null・文字列以外は確認できない応答 */
 function optString(obj: Obj, path: string): string | undefined {
   const v = get(obj, path);
-  if (v === undefined || v === null) return undefined;
+  if (v === undefined) return undefined;
+  if (v === null) throw nullValue(path);
   if (typeof v !== 'string') throw new MalformedResponse(`${path} が文字列ではありません（${show(v)}）`);
   return v;
 }
 
+/** オブジェクトの項目（必須）：欠落・null・オブジェクト以外は確認できない応答 */
 function reqObject(obj: Obj, path: string): Obj {
   const v = get(obj, path);
-  if (v === undefined || v === null) throw new MalformedResponse(`${path} がありません`);
+  if (v === undefined) throw new MalformedResponse(`${path} がありません`);
+  if (v === null) throw nullValue(path);
   if (!isObj(v)) throw new MalformedResponse(`${path} がオブジェクトではありません（${show(v)}）`);
   return v;
 }
 
-function condition(obj: Obj, type: string): Obj | undefined {
-  const conds = get(obj, 'status.conditions');
-  if (conds === undefined || conds === null) return undefined;
-  if (!Array.isArray(conds)) throw new MalformedResponse(`status.conditions が配列ではありません（${show(conds)}）`);
-  return conds.find((c) => isObj(c) && c.type === type);
+/** オブジェクトの項目（省略可）：キーが無ければ undefined、null・オブジェクト以外は確認できない応答 */
+function optObject(obj: Obj, path: string): Obj | undefined {
+  const v = get(obj, path);
+  if (v === undefined) return undefined;
+  if (v === null) throw nullValue(path);
+  if (!isObj(v)) throw new MalformedResponse(`${path} がオブジェクトではありません（${show(v)}）`);
+  return v;
+}
+
+/** 配列の項目（省略可）：キーが無ければ undefined、null・配列以外は確認できない応答 */
+function optArray(obj: Obj, path: string): unknown[] | undefined {
+  const v = get(obj, path);
+  if (v === undefined) return undefined;
+  if (v === null) throw nullValue(path);
+  if (!Array.isArray(v)) throw new MalformedResponse(`${path} が配列ではありません（${show(v)}）`);
+  return v;
+}
+
+interface Condition {
+  type: string;
+  status: string;
+  reason?: string;
+  message?: string;
+}
+
+/**
+ * status.conditions から type の条件を探す。配列の全要素を検証する：要素がオブジェクトで、type・status が空でない文字列、
+ * reason・message はキーがあれば文字列であること（null・不正な型は確認できない応答。読み飛ばさない）
+ */
+function condition(obj: Obj, type: string): Condition | undefined {
+  const conds = optArray(obj, 'status.conditions');
+  if (conds === undefined) return undefined;
+  let found: Condition | undefined;
+  conds.forEach((c, i) => {
+    const at = `status.conditions[${i}]`;
+    if (c === null) throw nullValue(at);
+    if (!isObj(c)) throw new MalformedResponse(`${at} がオブジェクトではありません（${show(c)}）`);
+    for (const key of ['type', 'status'] as const) {
+      if (c[key] === undefined) throw new MalformedResponse(`${at}.${key} がありません`);
+      if (c[key] === null) throw nullValue(`${at}.${key}`);
+      if (typeof c[key] !== 'string' || !c[key]) throw new MalformedResponse(`${at}.${key} が空でない文字列ではありません（${show(c[key])}）`);
+    }
+    for (const key of ['reason', 'message'] as const) {
+      if (c[key] === null) throw nullValue(`${at}.${key}`);
+      if (c[key] !== undefined && typeof c[key] !== 'string') throw new MalformedResponse(`${at}.${key} が文字列ではありません（${show(c[key])}）`);
+    }
+    if (found === undefined && c.type === type) found = c as Condition;
+  });
+  return found;
+}
+
+/**
+ * LoadBalancer の status.loadBalancer.ingress を検証し、有効な外部アドレス（ip または hostname が空でない文字列）を返す。
+ * - 要素の構造が不正（null・オブジェクト以外・ip／hostname が null や文字列以外）：確認できない応答
+ * - 構造は正しいが有効なアドレスが無い（[]、[{}]、ip が空文字等）：空配列（未割り当て）
+ */
+function lbAddresses(o: Obj): string[] {
+  optObject(o, 'status.loadBalancer');
+  const ingress = optArray(o, 'status.loadBalancer.ingress');
+  if (ingress === undefined) return [];
+  const addrs: string[] = [];
+  ingress.forEach((e, i) => {
+    const at = `status.loadBalancer.ingress[${i}]`;
+    if (e === null) throw nullValue(at);
+    if (!isObj(e)) throw new MalformedResponse(`${at} がオブジェクトではありません（${show(e)}）`);
+    let addr: string | undefined;
+    for (const key of ['ip', 'hostname'] as const) {
+      const v = e[key];
+      if (v === undefined) continue;
+      if (v === null) throw nullValue(`${at}.${key}`);
+      if (typeof v !== 'string') throw new MalformedResponse(`${at}.${key} が文字列ではありません（${show(v)}）`);
+      if (v && addr === undefined) addr = v;
+    }
+    if (addr !== undefined) addrs.push(addr);
+  });
+  return addrs;
 }
 
 const n = (v: number | undefined): string => (v === undefined ? '未報告' : String(v));
@@ -218,14 +309,9 @@ function judgeKind(kind: string, o: Obj): ReadinessJudgement {
       const clusterIP = optString(o, 'spec.clusterIP');
       if (!clusterIP) return { state: 'pending', detail: `${type}：clusterIP がまだ割り当てられていません` };
       if (type === 'LoadBalancer') {
-        const lb = get(o, 'status.loadBalancer');
-        if (lb !== undefined && lb !== null && !isObj(lb)) throw new MalformedResponse(`status.loadBalancer がオブジェクトではありません（${show(lb)}）`);
-        const ingress = get(o, 'status.loadBalancer.ingress');
-        if (ingress !== undefined && ingress !== null && !Array.isArray(ingress)) {
-          throw new MalformedResponse(`status.loadBalancer.ingress が配列ではありません（${show(ingress)}）`);
-        }
-        return Array.isArray(ingress) && ingress.length > 0
-          ? { state: 'ready', detail: `LoadBalancer：外部アドレス割り当て済み（clusterIP ${clusterIP}）` }
+        const addrs = lbAddresses(o);
+        return addrs.length > 0
+          ? { state: 'ready', detail: `LoadBalancer：外部アドレス割り当て済み（${addrs.join('、')}／clusterIP ${clusterIP}）` }
           : { state: 'pending', detail: `LoadBalancer：外部アドレスがまだ割り当てられていません（clusterIP ${clusterIP}）` };
       }
       // ClusterIP・NodePort はアドレスの割り当てまでを判定する（宛先 Pod の有無＝Endpoints は判定に含めない）
