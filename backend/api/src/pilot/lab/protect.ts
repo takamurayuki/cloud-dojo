@@ -21,6 +21,9 @@
  * 名前 docker.sock・名前付きパイプ・`\` を含むパス）と同じにする。ソケットを持たない通常のコンテナの扱いは変わらない。
  * 直し回7（必須1）：Source は書き換えずに（trim 等をせずに）共有関数 dockerSocketReason へ渡す。前後の空白・`\`・制御文字を
  * 含む Source は判定不能として、ソケットを保有するものと同じに保護する。
+ * 直し回8（必須1）：空文字列・空白だけの Source も読み飛ばさず、判定不能として同じに保護する（compose の bind・
+ * Kubernetes の hostPath と同じ規則）。そのため、Source が空のマウント（tmpfs 等）を持つ通常のコンテナも、
+ * この API からは実行・削除・停止・起動できない（判定不能を許可側に倒さない）。
  *
  * 名前で指定された場合、inspect の後に同じ名前が別のコンテナに付け替えられても対象がずれないよう、
  * 以後の操作は inspect で確かめた完全な ID に対して行う（resolveUnprotectedContainer の戻り値を使う）。
@@ -69,7 +72,9 @@ export interface MountLike {
 /** Mounts のうち Docker ソケット（compose の検査と同じ基準）を元に持つものがあれば理由を返す。無ければ null */
 export function dockerSocketMountReason(mounts: MountLike[] | null | undefined): string | null {
   for (const m of mounts ?? []) {
-    if (typeof m?.Source !== 'string' || !m.Source) continue;
+    // 直し回8（必須1）：空文字列・空白だけの Source も読み飛ばさず共有関数に渡す（判定不能として保護対象にする。
+    // tmpfs 等の Source が空のマウントを持つコンテナも、この API からは操作できなくなる）
+    if (typeof m?.Source !== 'string') continue;
     const reason = dockerSocketReason(m.Source);
     if (reason) return `${m.Source} → ${m.Destination ?? '?'}: ${reason}`;
   }

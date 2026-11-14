@@ -187,22 +187,23 @@ export async function runComposeUpJob(
       );
     }
     if (session.setupFailure) throw new Error(session.setupFailure);
-    if (session.protectedRejections && session.protectedRejections.length > 0) {
-      const detail = session.protectedRejections.map((name) => `${name}: ${session.services[name]?.error ?? ''}`).join('; ');
-      throw new Error(
-        `パイロットのラボ（または Docker ソケットをマウントしたコンテナ）を保護するため、次のサービスの既存コンテナを停止・削除せずに中止しました（${detail}）`,
-      );
-    }
     // 直し回7（推奨A）：サービス個別の作成・起動の失敗もジョブ失敗にする（以前は session に記録するだけで success:true を返していた）。
     // 部分成功の場合は、起動できたサービスと失敗したサービスを両方とも結果に明示する
     const summary = summarizeServices(session);
-    if (summary.failed.length > 0) {
+    const servicesDetail =
+      `${summary.succeeded.length > 0 ? '一部の' : 'すべての'}サービスを起動できませんでした（` +
+      `起動したサービス：${summary.succeeded.length > 0 ? summary.succeeded.join(', ') : 'なし'}／` +
+      `失敗したサービス：${summary.failed.map((f) => `${f.name}: ${f.error}`).join('; ')}）`;
+    if (session.protectedRejections && session.protectedRejections.length > 0) {
+      // 直し回8（推奨）：保護拒否を含む場合も、保護の理由に続けて共通のサービス集計（起動したもの・失敗したもの）を載せる
+      // （以前はこの分岐が先に例外にしたため、起動できたサービスが失敗理由に出なかった）
+      const detail = session.protectedRejections.map((name) => `${name}: ${session.services[name]?.error ?? ''}`).join('; ');
       throw new Error(
-        `${summary.succeeded.length > 0 ? '一部の' : 'すべての'}サービスを起動できませんでした（` +
-          `起動したサービス：${summary.succeeded.length > 0 ? summary.succeeded.join(', ') : 'なし'}／` +
-          `失敗したサービス：${summary.failed.map((f) => `${f.name}: ${f.error}`).join('; ')}）`,
+        `パイロットのラボ（または Docker ソケットをマウントしたコンテナ）を保護するため、次のサービスの既存コンテナを停止・削除せずに中止しました（${detail}）。` +
+          servicesDetail,
       );
     }
+    if (summary.failed.length > 0) throw new Error(servicesDetail);
     await updateProgress(100);
     return {
       success: true,

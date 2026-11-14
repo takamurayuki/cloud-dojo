@@ -7,7 +7,7 @@
  *
  * 拒否するもの（compose の検査 services/compose-guard.ts と同じ基準）：
  * 1. volumes[].hostPath.path が Docker ソケット、またはそれを含む親ディレクトリ（compose・既存コンテナの Mounts と同じ
- *    共有関数 dockerSocketReason で判定。/、/run、/var/run、名前 docker.sock、`\`・前後の空白・制御文字を含むパス等）
+ *    共有関数 dockerSocketReason で判定。/、/run、/var/run、名前 docker.sock、`\`・前後の空白・制御文字を含むパス、空・空白だけのパス等）
  * 2. コンテナの securityContext.privileged が真
  * 3. Pod の hostNetwork・hostPID・hostIPC が真
  * 4. コンテナの securityContext.capabilities.add のうち、compose と同じ許可リスト（ALLOWED_CAP_ADD）に無いもの
@@ -24,6 +24,10 @@
  * ConfigMap・Secret 等の data・stringData、annotations・labels、env の値等は検査しない。
  * 上の種類以外（CRD 等）は、spec.template.spec・spec.jobTemplate.spec.template.spec に containers の配列を持つときだけ、
  * PodSpec として同じに検査する（Pod テンプレートを持つ一般的な形。データ領域ではないため誤検出にならない）。
+ *
+ * 直し回8（必須2）：List の入れ子は MAX_LIST_DEPTH（8）段までを検査する。それより深い要素は、中身によらず「検査不能」として
+ * 違反に記録し、マニフェスト全体を拒否する（以前は記録せずに読み飛ばしたため、9重以上の List に包んだ危険な Pod が通っていた。
+ * kubectl は入れ子の List を段数の上限なく展開する）。危険な指定を含まない深い List も同じに拒否する。
  *
  * 真偽値は、kubectl の YAML（YAML 1.1）で真になる書き方（true・yes・on・y の大文字小文字）も真として扱う
  * （js-yaml は YAML 1.2 のため `yes` を文字列として読む。見た目の差で通さない）。
@@ -141,10 +145,21 @@ function inspectHostPath(hostPath: unknown, at: string, add: (path: string, deta
   if (reason) add(at, reason);
 }
 
+/**
+ * List の入れ子を検査する段数の上限（直し回8 必須2）。最上位のドキュメントを 0 段とし、List の items[] の要素を 1 段深いとする。
+ * 上限ちょうど（8 重の List の中の要素）までは検査し、それより深い要素は検査不能として拒否する
+ */
+export const MAX_LIST_DEPTH = 8;
+
 /** 1つのドキュメント（リソース）を、種類ごとの構造上の位置で検査する */
 function inspectResource(doc: unknown, prefix: string, docIndex: number, out: K8sManifestViolation[], depth = 0): void {
-  if (!isRecord(doc) || depth > 8) return;
   const add = (p: string, detail: string) => out.push({ doc: docIndex, path: prefix ? `${prefix}.${p}` : p, detail });
+  // 直し回8（必須2）：上限を超えた位置は、中身を見ずに検査不能として拒否する（超過を通過にしない）
+  if (depth > MAX_LIST_DEPTH) {
+    out.push({ doc: docIndex, path: prefix || '(root)', detail: `List の入れ子が ${MAX_LIST_DEPTH} 段を超えるため検査できない（検査不能として拒否する）` });
+    return;
+  }
+  if (!isRecord(doc)) return;
   const kind = typeof doc.kind === 'string' ? doc.kind : '';
 
   if (kind === 'List' || (kind.endsWith('List') && Array.isArray(doc.items))) {

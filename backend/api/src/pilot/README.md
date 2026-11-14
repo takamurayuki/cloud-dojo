@@ -59,8 +59,10 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   3. **定義・マニフェストの検証**：compose の定義と Kubernetes のマニフェストは、ホストを操作できる設定を含めば適用前に拒否する（下記）
   パスの判定（compose の bind、既存コンテナの `Mounts[].Source`、Kubernetes の `hostPath.path`）は、どれも同じ共有関数
   （`services/compose-guard.ts` の `dockerSocketReason`）で行う。検査には実際に Docker・kubelet へ渡す文字列そのものを使い、
-  書き換え（trim 等）はしない。前後の空白・`\`・制御文字を含むパスや空のパスは、解釈を一致させられないため判定不能として
-  拒否する（既存コンテナでは保護対象にする）。ラベルもソケットも持たない通常のリソースは従来どおり操作できる。
+  書き換え（trim 等）はしない。前後の空白・`\`・制御文字を含むパスや、空・空白だけのパスは、解釈を一致させられないため判定不能として
+  拒否する（既存コンテナでは保護対象にする）。空・空白だけのパスは3経路とも読み飛ばさない（compose の短い書式 `:/x`・長い書式の
+  `source: ""`、既存コンテナの空の `Mounts[].Source`、空の `hostPath.path`）。そのため、Source が空のマウント（tmpfs 等）を持つ
+  通常のコンテナも、この API からは実行・削除・停止・起動できない（判定不能を許可側に倒さない）。ラベルもソケットも持たない通常のリソースは従来どおり操作できる。
   対象の経路：
   - `POST /api/network/exec`、`DELETE /api/docker/containers/:id`、`POST /api/docker/containers/:id/stop`・`start`
   - `POST /api/network/lab/create`（固定名 `network-node-<i>` の既存コンテナ削除。何も作らないうちに拒否する）。
@@ -73,7 +75,7 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   - `DELETE /api/network/lab/cleanup`（ラベル `cloud-dojo=network-lab` の一括削除。対象に1つでもあれば何も削除せずに拒否する）
   - compose（`POST /api/compose/up` の同名コンテナ削除、`/api/compose/down`・`down-volumes` のコンテナ・ネットワーク削除。
     どちらもキューのジョブが失敗として終わる。up は、保護したサービスを作り直さず、他のサービスの起動は従来どおり続けたうえで
-    ジョブを失敗にする）。up の存在確認（既存コンテナ・ボリューム・イメージの inspect）は 404 だけを「存在しない」とし、
+    ジョブを失敗にする。このときの失敗理由には、保護の理由に続けて、起動したサービスと失敗したサービスを両方とも出す）。up の存在確認（既存コンテナ・ボリューム・イメージの inspect）は 404 だけを「存在しない」とし、
     それ以外の失敗（500・通信エラー等）ではそのサービスを作成しない。サービス個別の作成・起動の失敗もジョブの失敗にし、
     失敗理由に起動したサービスと失敗したサービスを両方とも出す（一部だけ起動した場合も成功にはしない）。up の接続先ネットワーク `<project>_<network>` が既にあれば、名前の完全一致と、
     このプロジェクトの compose ネットワークのラベル（この API が作成時に付ける `cloud-dojo=compose`・
@@ -106,7 +108,8 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     PodTemplate の `template.spec`、CronJob の `spec.jobTemplate.spec.template.spec`、List の `items`、Pod テンプレートを持つ CRD）の
     コンテナの `securityContext`（`privileged`、許可リスト外の `capabilities.add`）、`hostNetwork`・`hostPID`・`hostIPC`、
     `volumes[].hostPath.path`（Docker ソケット等）と、PersistentVolume の `spec.hostPath.path` だけを見る。
-    ConfigMap・Secret の `data` 等にある同名のキーは検査しない。真偽値は kubectl と同じく `yes`・`on`・`y` も真とする
+    ConfigMap・Secret の `data` 等にある同名のキーは検査しない。List の入れ子は8段まで検査し、それより深い要素を含む
+    マニフェストは、危険な指定の有無によらず検査不能として同じ 400 `K8S_MANIFEST_REJECTED` で拒否する（Worker 側も kubectl を起動しない）。真偽値は kubectl と同じく `yes`・`on`・`y` も真とする
   - CI/CD の real 実行（`POST /api/cicd/run` の `executionMode: real`）：許可パターン（`echo …`、`node`・`npm`・`pnpm`・
     `docker`・`git` の `--version`、`ls`、`pwd`、`date`、`whoami`）と引数まで完全に一致する行だけを、シェルを介さずに
     （execFile）実行する。シェルのメタ文字（`; & | $ ( ) < >`、バッククォート、改行、バックスラッシュ）を含む行は実行せずに

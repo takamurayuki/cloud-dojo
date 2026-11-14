@@ -124,7 +124,10 @@ const WELL_KNOWN_SOCKETS = ['/var/run/docker.sock', '/run/docker.sock'];
  * - 空文字列
  */
 export function uninterpretablePathReason(raw: string): string | null {
+  // 直し回8（必須1）：空文字列・空白だけの文字列は、どの経路（compose の bind の全書式、既存コンテナの Mounts.Source、
+  // Kubernetes の hostPath）でも呼び出し側で読み飛ばさず、ここで判定不能として拒否する
   if (raw === '') return '空のパスは指すものを判定できない';
+  if (raw.trim() === '') return `${JSON.stringify(raw)} は空白だけのパスのため、指すものを判定できない`;
   if (raw !== raw.trim()) return `${JSON.stringify(raw)} は前後に空白を含むため、指すものを判定できない（検査と実際の利用で解釈が分かれ得る）`;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f-\u009f]/.test(raw)) return `${JSON.stringify(raw)} は制御文字を含むため、指すものを判定できない`;
@@ -244,7 +247,7 @@ function shortSyntaxBindSource(spec: string): string | null {
   // Windows のドライブ指定（C:\x:/y）
   const drive = spec.match(/^([A-Za-z]:[\\/][^:]*):/);
   const src = drive ? drive[1] : spec.split(':')[0];
-  if (!src) return null;
+  // 直し回8（必須1）：空・空白だけの元（`:/var/run/docker.sock` 等）も読み飛ばさず返す（呼び出し側が判定不能として拒否する）
   if (uninterpretablePathReason(src)) return src;
   if (src.startsWith('/') || src.startsWith('.') || src.startsWith('~') || drive) return src;
   // 区切りが無い（`- /data` のような匿名ボリューム）は bind ではない
@@ -302,11 +305,12 @@ export function inspectComposeDefinition(composeYaml: string, env: SocketCheckEn
     for (const vol of asList(svc.volumes)) {
       if (typeof vol === 'string') {
         const src = shortSyntaxBindSource(vol);
-        if (src) checkPath(name, 'volumes', src);
+        if (src !== null) checkPath(name, 'volumes', src);
       } else if (isRecord(vol)) {
         // 長い書式：type が bind でなくても source がホストパスの形なら判定する（見た目の type で見逃さない）
         const src = vol.source ?? vol.src;
-        if (typeof src === 'string' && (vol.type === 'bind' || shortSyntaxBindSource(`${src}:x`))) checkPath(name, 'volumes', src);
+        // 直し回8（必須1）：空・空白だけの source も判定不能として拒否する（shortSyntaxBindSource が '' を返すため null と比べる）
+        if (typeof src === 'string' && (vol.type === 'bind' || shortSyntaxBindSource(`${src}:x`) !== null)) checkPath(name, 'volumes', src);
       }
     }
 
@@ -352,10 +356,11 @@ export function inspectBinds(service: string, binds: string[], env: SocketCheckE
     // 直し回7（必須1）：元の部分は書き換えずに渡す。解釈を一致させられない文字（前後の空白・`\`・制御文字）を含めば、
     // 名前付きボリュームの形でも判定不能として拒否する
     const sources = new Set<string>();
+    // 直し回8（必須1）：空・空白だけの元パスも読み飛ばさない（'' は null と区別して扱う）
     const src = shortSyntaxBindSource(b);
-    if (src) sources.add(src);
+    if (src !== null) sources.add(src);
     const dockerSrc = b.split(':')[0];
-    if (dockerSrc && (dockerSrc.startsWith('/') || dockerSrc.startsWith('.') || uninterpretablePathReason(dockerSrc))) sources.add(dockerSrc);
+    if ((dockerSrc.startsWith('/') || dockerSrc.startsWith('.') || uninterpretablePathReason(dockerSrc))) sources.add(dockerSrc);
     for (const p of sources) {
       const reason = dockerSocketReason(p, env);
       if (reason) out.push({ service, field: 'volumes', detail: reason });
