@@ -4,6 +4,7 @@ import { promises as fs } from 'fs';
 import { promisify } from 'util';
 import * as yaml from 'js-yaml';
 import { validateKind, validateManifestDocs, validateNamespace, validateResourceName, validateTail } from './k8s-args';
+import { judgeReadiness } from './k8s-readiness';
 
 const execFileAsync = promisify(execFile);
 
@@ -36,12 +37,21 @@ export interface K8sDeploySession {
   resources: Array<{
     kind: string;
     name: string;
-    status: 'pending' | 'creating' | 'ready' | 'error';
+    /** unverified：存在は確認したが、この種別の準備完了は判定できない（ready とはみなさない。直し回13） */
+    status: 'pending' | 'creating' | 'ready' | 'unverified' | 'error';
     error?: string;
+    /** 適用後の確認の結果（判定の根拠。直し回13） */
+    detail?: string;
   }>;
   startTime: Date;
   endTime?: Date;
   error?: string;
+  /** 適用後の確認の内訳（`Kind/name` の一覧。直し回13） */
+  verification?: {
+    ready: string[];
+    unverified: string[];
+    failed: string[];
+  };
 }
 
 export interface PodInfo {
@@ -83,6 +93,12 @@ export class KubernetesService extends EventEmitter {
   private mockDeployments: Map<string, DeploymentInfo[]> = new Map();
   private mockServices: Map<string, ServiceInfo[]> = new Map();
   private useMockMode: boolean = USE_MOCK_MODE;
+  /** 適用後の確認の回数と間隔（直し回13。合計で最大 attempts × intervalMs 待つ） */
+  private readinessWait = { attempts: 15, intervalMs: 2000 };
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   async checkKubectl(): Promise<boolean> {
     if (this.useMockMode) {
@@ -200,31 +216,68 @@ export class KubernetesService extends EventEmitter {
         session.status = 'running';
         this.emit('update', session);
 
-        // Wait a bit for resources to be created
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        // Check resource statuses
-        for (const resource of session.resources) {
-          try {
-            const { stdout: statusOut } = await kubectl([
-              'get',
-              resource.kind,
-              resource.name,
-              '-n',
-              namespace,
-              '-o',
-              'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
-            ]);
-            
-            resource.status = 'ready';
-            console.log(`✅ ${resource.kind}/${resource.name} is ready`);
-          } catch (error: any) {
-            // Some resources don't have Ready condition, that's ok
-            resource.status = 'ready';
-            console.log(`✅ ${resource.kind}/${resource.name} created`);
+        // 直し回13（推奨A）：適用後の確認。以前は kubectl get の成否も取得した status も見ずに ready・completed にしていた。
+        // - get の失敗・JSON として読めない応答は、そのリソースの失敗（error）にする
+        // - 種別ごとの規則（k8s-readiness.ts）で判定し、pending の間は間隔を空けて取り直す。期限までに ready にならなければ失敗
+        // - 規則の無い種別は unverified（存在のみ確認）とし、ready には数えない
+        const label = (r: { kind: string; name: string }) => `${r.kind}/${r.name}`;
+        let waiting = [...session.resources];
+        for (let attempt = 1; waiting.length > 0; attempt++) {
+          await this.sleep(this.readinessWait.intervalMs);
+          const stillPending: typeof waiting = [];
+          for (const resource of waiting) {
+            let obj: unknown;
+            try {
+              const { stdout: statusOut } = await kubectl(['get', resource.kind, resource.name, '-n', namespace, '-o', 'json']);
+              try {
+                obj = JSON.parse(statusOut);
+              } catch {
+                throw new Error('kubectl get の応答を JSON として読めませんでした');
+              }
+            } catch (error: any) {
+              resource.status = 'error';
+              resource.error = `適用後の状態を確認（kubectl get）できなかったため、準備完了とはみなしません（${error?.message ?? String(error)}）`;
+              console.log(`❌ ${label(resource)}: ${resource.error}`);
+              this.emit('update', session);
+              continue;
+            }
+            const judged = judgeReadiness(resource.kind, obj);
+            resource.detail = judged.detail;
+            if (judged.state === 'ready') {
+              resource.status = 'ready';
+              console.log(`✅ ${label(resource)} is ready (${judged.detail})`);
+            } else if (judged.state === 'unverifiable') {
+              resource.status = 'unverified';
+              console.log(`❔ ${label(resource)}: ${judged.detail}`);
+            } else if (judged.state === 'failed') {
+              resource.status = 'error';
+              resource.error = judged.detail;
+              console.log(`❌ ${label(resource)}: ${judged.detail}`);
+            } else if (attempt >= this.readinessWait.attempts) {
+              resource.status = 'error';
+              resource.error = `${this.readinessWait.attempts}回確認しても準備完了になりませんでした（${judged.detail}）`;
+              console.log(`❌ ${label(resource)}: ${resource.error}`);
+            } else {
+              stillPending.push(resource);
+            }
+            this.emit('update', session);
           }
-          
-          this.emit('update', session);
+          waiting = stillPending;
+        }
+
+        session.verification = {
+          ready: session.resources.filter((r) => r.status === 'ready').map(label),
+          unverified: session.resources.filter((r) => r.status === 'unverified').map(label),
+          failed: session.resources.filter((r) => r.status === 'error').map(label),
+        };
+        const v = session.verification;
+        if (v.failed.length > 0) {
+          throw new Error(
+            `適用後の確認で準備完了を確認できないリソースがあります（失敗：${session.resources
+              .filter((r) => r.status === 'error')
+              .map((r) => `${label(r)}: ${r.error}`)
+              .join('／')}／準備完了：${v.ready.join(', ') || 'なし'}／判定不能（存在のみ確認）：${v.unverified.join(', ') || 'なし'}）`,
+          );
         }
 
         session.status = 'completed';

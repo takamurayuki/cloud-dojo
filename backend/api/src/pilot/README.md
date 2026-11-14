@@ -126,13 +126,27 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     コンテナの `securityContext`（`privileged`、許可リスト外の `capabilities.add`）、`hostNetwork`・`hostPID`・`hostIPC`、
     `volumes[].hostPath.path`（Docker ソケット等）と、PersistentVolume の `spec.hostPath.path` だけを見る。
     ConfigMap・Secret の `data` 等にある同名のキーは検査しない。List の入れ子は8段まで検査し、それより深い要素を含む
-    マニフェストは、危険な指定の有無によらず検査不能として同じ 400 `K8S_MANIFEST_REJECTED` で拒否する（Worker 側も kubectl を起動しない）。真偽値は kubectl と同じく `yes`・`on`・`y` も真とする
+    マニフェストは、危険な指定の有無によらず検査不能として同じ 400 `K8S_MANIFEST_REJECTED` で拒否する（Worker 側も kubectl を起動しない）。真偽値は kubectl と同じく `yes`・`on`・`y` も真とする。
+    apply の後は各リソースを `kubectl get <kind> <name> -o json` で取得し、種別ごとの規則（`services/k8s-readiness.ts`）で準備完了を判定する。
+    取得の失敗（通信・認証・NotFound 等）・JSON として読めない応答・失敗が確定した状態（Pod の Failed、Job の Failed、
+    Deployment の ProgressDeadlineExceeded 等）・期限（2秒間隔で15回）までに準備完了にならないものは、そのリソースを `error` にし、
+    セッションも `error` にしてジョブを失敗させる（失敗・準備完了・判定不能の内訳を message に出す）。判定するのは
+    Deployment・StatefulSet・ReplicaSet（更新・利用可能／準備完了のレプリカ数）、DaemonSet（配置・利用可能数）、Pod（Running かつ Ready、または Succeeded）、
+    Job（Complete）、Service（clusterIP の割り当て。LoadBalancer は外部アドレスの割り当て。Endpoints は見ない）、PersistentVolumeClaim（Bound）、
+    Namespace（Active）。それ以外の種別（ConfigMap・Secret・CRD 等）は存在だけを確かめて `unverified`（判定不能）とし、`ready` とはみなさない。
+    内訳はセッションの `verification`（ready・unverified・failed）に入る。mock モードの模擬適用は従来どおり
   - CI/CD の real 実行（`POST /api/cicd/run` の `executionMode: real`）：許可パターン（`echo …`、`node`・`npm`・`pnpm`・
     `docker`・`git` の `--version`、`ls`、`pwd`、`date`、`whoami`）と引数まで完全に一致する行だけを、シェルを介さずに
     （execFile）実行する。シェルのメタ文字（`; & | $ ( ) < >`、バッククォート、改行、バックスラッシュ）を含む行は実行せずに
     ステップを失敗させる。許可した行の実行自体が失敗した場合（コマンドが無い・終了コードが0以外・時間切れ等）も、
-    模擬の結果には置き換えずにステップを失敗させる（模擬は `executionMode: simulation` を選んだときだけ）。
-    docker は `docker --version` だけなので、この経路でラボを停止・削除することはできない
+    模擬の結果には置き換えずにステップを失敗させる（許可した行の実行失敗から模擬へは自動で切り替えない）。
+    real でも、メタ文字を含まず許可パターンにも一致しない行は、実行せずに模擬の結果を返す（従来どおり。出力は実行結果ではない）。
+    docker は `docker --version` だけなので、この経路でラボを停止・削除することはできない。
+    ワークフロー全体の結論は、全ジョブが成功したときだけ `success`。1つでも失敗したら run は `failed`／`failure` になり、
+    失敗（またはスキップ）したジョブに `needs` で依存するジョブは実行せずに結論 `skipped`（理由は `skipReason`）にする。
+    依存関係を解決できないジョブ（循環・存在しないジョブ）も実行せずに `skipped` とし、run は `failure` にする。
+    依存の無いジョブは従来の順序（依存段ごとのバッチ。同じバッチは並行）で実行する。ジョブの `if` は評価しない（従来どおり）。
+    成功・失敗・スキップの内訳は run の `summary`（succeeded・failed・skipped）と、失敗時の `error` に入る
   ログの取得（読み取り）は拒否しない。Docker を直接操作（docker CLI 等）した場合の干渉は防げない。
 
 - Node 22.5 以上が必要（`node:sqlite` を使う）。保存先の既定は `backend/api/.data/pilot.sqlite`（git 管理外）。

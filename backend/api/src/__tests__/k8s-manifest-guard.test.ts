@@ -9,9 +9,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const cp = vi.hoisted(() => {
   const calls = { execFile: [] as { file: string; args: string[] }[] };
+  /** 直し回13：apply 後の `kubectl get <Kind> <name> -o json` には、どの判定対象種別でも準備完了になる状態を返す */
+  const readyObject = (kind: string) =>
+    JSON.stringify({
+      kind,
+      metadata: { name: 'x' },
+      spec: { replicas: 1, clusterIP: '10.96.0.1' },
+      status: {
+        updatedReplicas: 1,
+        availableReplicas: 1,
+        readyReplicas: 1,
+        desiredNumberScheduled: 1,
+        updatedNumberScheduled: 1,
+        numberAvailable: 1,
+        phase: kind === 'PersistentVolumeClaim' ? 'Bound' : kind === 'Namespace' ? 'Active' : 'Running',
+        conditions: [
+          { type: 'Ready', status: 'True' },
+          { type: 'Complete', status: 'True' },
+        ],
+      },
+    });
   const execFile = (file: string, args: string[], _opts: unknown, cb: (e: unknown, o: string, s: string) => void) => {
     calls.execFile.push({ file, args });
-    cb(null, args[0] === 'get' ? JSON.stringify({ status: {} }) : 'ok\n', '');
+    cb(null, args[0] === 'get' ? readyObject(args[1]) : 'ok\n', '');
   };
   Object.defineProperty(execFile, Symbol.for('nodejs.util.promisify.custom'), {
     value: (file: string, args: string[], opts: unknown) =>

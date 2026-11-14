@@ -391,7 +391,12 @@ export async function initializeWorkers(fastify?: FastifyInstance) {
             success: true,
             namespace,
             sessionId: session.id,
-            message: 'K8s resources deployed successfully',
+            verification: session.verification,
+            // 直し回13（推奨A）：判定できない種別があれば、ready と区別して伝える
+            message:
+              session.verification && session.verification.unverified.length > 0
+                ? `K8s resources applied（準備完了：${session.verification.ready.join(', ') || 'なし'}／判定不能（存在のみ確認）：${session.verification.unverified.join(', ')}）`
+                : 'K8s resources deployed successfully',
           };
         } catch (error: any) {
           throw new Error(`K8s deployment failed: ${error.message}`);

@@ -44,6 +44,11 @@ const cp = vi.hoisted(() => {
         ],
       });
     if (verb === 'get' && what === 'namespaces') return 'default kube-system demo';
+    // 直し回13：apply 後の確認（`get <Kind> <name> -n <ns> -o json`）には準備完了の状態を返す
+    if (verb === 'get' && what === 'Deployment')
+      return JSON.stringify({ kind: 'Deployment', metadata: { name: args[2] }, spec: { replicas: 1 }, status: { updatedReplicas: 1, availableReplicas: 1 } });
+    if (verb === 'get' && what === 'Service')
+      return JSON.stringify({ kind: 'Service', metadata: { name: args[2] }, spec: { type: 'ClusterIP', clusterIP: '10.96.0.20' }, status: {} });
     if (verb === 'config') return 'kind-cluster\n';
     if (verb === 'logs') return 'line1\nline2\n';
     return `ok ${args.join(' ')}\n`;
@@ -303,10 +308,10 @@ describe('正常な k8s 入力は従来どおり、execFile（shell:false）で�
     expect(apply.args.slice(0, 2)).toEqual(['apply', '-f']);
     expect(apply.args[2]).toMatch(/k8s-manifest-k8s-\d+\.yaml$/);
     expect(apply.args.slice(3)).toEqual(['-n', 'demo']);
-    const jsonpath = 'jsonpath={.status.conditions[?(@.type=="Ready")].status}';
+    // 直し回13：適用後の確認は種別ごとの判定のために -o json で全体を取得する（以前は Ready 条件の jsonpath を取得して結果を見ていなかった）
     expect(gets.map((c) => c.args)).toEqual([
-      ['get', 'Deployment', 'web', '-n', 'demo', '-o', jsonpath],
-      ['get', 'Service', 'web-svc', '-n', 'demo', '-o', jsonpath],
+      ['get', 'Deployment', 'web', '-n', 'demo', '-o', 'json'],
+      ['get', 'Service', 'web-svc', '-n', 'demo', '-o', 'json'],
     ]);
     expect(cp.calls.execFile.every((c) => c.file === 'kubectl' && c.shell === false)).toBe(true);
     expect(cp.calls.exec).toHaveLength(0);

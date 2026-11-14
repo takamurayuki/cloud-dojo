@@ -45,6 +45,17 @@ export interface WorkflowRun {
   duration?: number;
   trigger: string;
   branch: string;
+  /**
+   * 直し回13（必須）：ジョブごとの結果の内訳。conclusion が success になるのは全ジョブが success のときだけ。
+   * skipped は実行しなかったジョブと、その理由（失敗・スキップした依存ジョブ、または解決できない依存）。
+   */
+  summary?: {
+    succeeded: string[];
+    failed: string[];
+    skipped: Array<{ job: string; reason: string }>;
+  };
+  /** 失敗したときの説明（内訳の要約） */
+  error?: string;
 }
 
 export interface JobRun {
@@ -57,6 +68,8 @@ export interface JobRun {
   endTime?: Date;
   duration?: number;
   runner: string;
+  /** 実行しなかった理由（conclusion が skipped のとき） */
+  skipReason?: string;
 }
 
 export interface StepRun {
@@ -200,31 +213,102 @@ export class CICDService extends EventEmitter {
     
     // Build job dependency graph
     const jobGraph = this.buildJobGraph(workflow);
-    const completedJobs = new Set<string>();
-    
+    // 直し回13（必須）：ジョブの結果を記録し、全体の結論と依存ジョブの実行可否に使う（以前は失敗したジョブも完了扱いで、
+    // 全体は無条件に success になっていた）。バッチの実行順序（同じバッチは並行、バッチは順番）は従来どおり
+    const results = new Map<string, 'success' | 'failure' | 'skipped'>();
+    const skipped: Array<{ job: string; reason: string }> = [];
+    const skip = (jobId: string, reason: string) => {
+      results.set(jobId, 'skipped');
+      skipped.push({ job: jobId, reason });
+      this.recordSkippedJob(runId, jobId, workflow.jobs[jobId], reason);
+    };
+
     try {
       // Execute jobs in order based on dependencies
       for (const jobBatch of jobGraph) {
         await Promise.all(
           jobBatch.map(async (jobId) => {
             const job = workflow.jobs[jobId];
-            await this.executeJob(runId, jobId, job, executionMode);
-            completedJobs.add(jobId);
+            // 依存ジョブが1つでも success でなければ（failure・skipped）、このジョブは実行しない
+            const blocking = this.jobNeeds(job).filter((dep) => results.get(dep) !== 'success');
+            if (blocking.length > 0) {
+              skip(
+                jobId,
+                `依存ジョブが成功しなかったため実行しませんでした（${blocking.map((dep) => `${dep}: ${results.get(dep) ?? '未実行'}`).join('、')}）`,
+              );
+              return;
+            }
+            const jobRun = await this.executeJob(runId, jobId, job, executionMode);
+            results.set(jobId, jobRun?.conclusion === 'success' ? 'success' : 'failure');
           })
         );
       }
-      
-      run.status = 'completed';
-      run.conclusion = 'success';
+
+      // 依存関係を解決できず、どのバッチにも入らなかったジョブ（循環・存在しないジョブへの依存）も実行していないことを明示する
+      for (const jobId of Object.keys(workflow.jobs)) {
+        if (!results.has(jobId)) {
+          skip(jobId, `依存関係を解決できないため実行しませんでした（needs: ${this.jobNeeds(workflow.jobs[jobId]).join(', ') || 'なし'}。循環または存在しないジョブへの依存）`);
+        }
+      }
+
+      this.finishRun(run, results, skipped);
     } catch (error: any) {
+      run.summary = this.summarize(results, skipped);
       run.status = 'failed';
       run.conclusion = 'failure';
+      run.error = `ワークフローの実行中にエラーが発生しました（${error?.message ?? String(error)}）`;
     }
     
     run.endTime = new Date();
     run.duration = run.endTime.getTime() - run.startTime.getTime();
     
     this.emit('run:completed', run);
+  }
+
+  private jobNeeds(job: WorkflowJob): string[] {
+    return job.needs ? (Array.isArray(job.needs) ? job.needs : [job.needs]) : [];
+  }
+
+  private summarize(results: Map<string, 'success' | 'failure' | 'skipped'>, skipped: Array<{ job: string; reason: string }>): NonNullable<WorkflowRun['summary']> {
+    const pick = (c: 'success' | 'failure') => [...results.entries()].filter(([, v]) => v === c).map(([k]) => k);
+    return { succeeded: pick('success'), failed: pick('failure'), skipped: [...skipped] };
+  }
+
+  /** 全ジョブが success のときだけ run を success にする。それ以外は failure とし、内訳を error に書く */
+  private finishRun(run: WorkflowRun, results: Map<string, 'success' | 'failure' | 'skipped'>, skipped: Array<{ job: string; reason: string }>): void {
+    const summary = this.summarize(results, skipped);
+    run.summary = summary;
+    if (summary.failed.length === 0 && summary.skipped.length === 0) {
+      run.status = 'completed';
+      run.conclusion = 'success';
+      return;
+    }
+    run.status = 'failed';
+    run.conclusion = 'failure';
+    run.error =
+      `ワークフローは成功しませんでした（成功：${summary.succeeded.join(', ') || 'なし'}／失敗：${summary.failed.join(', ') || 'なし'}／` +
+      `スキップ：${summary.skipped.map((s) => s.job).join(', ') || 'なし'}）`;
+  }
+
+  /** 実行しなかったジョブを、結論 skipped・理由つきで run に記録する（ステップは実行しない） */
+  private recordSkippedJob(runId: string, jobId: string, job: WorkflowJob, reason: string): void {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    const now = new Date();
+    const jobRun: JobRun = {
+      id: `${runId}-${jobId}`,
+      name: job.name || jobId,
+      status: 'completed',
+      conclusion: 'skipped',
+      steps: [],
+      runner: job['runs-on'],
+      skipReason: reason,
+      startTime: now,
+      endTime: now,
+      duration: 0,
+    };
+    run.jobs.push(jobRun);
+    this.emit('job:completed', { runId, jobRun });
   }
 
   private buildJobGraph(workflow: Workflow): string[][] {
@@ -239,7 +323,7 @@ export class CICDService extends EventEmitter {
         if (processed.has(jobId)) continue;
         
         const job = workflow.jobs[jobId];
-        const needs = job.needs ? (Array.isArray(job.needs) ? job.needs : [job.needs]) : [];
+        const needs = this.jobNeeds(job);
         
         // Check if all dependencies are processed
         if (needs.every(dep => processed.has(dep))) {
@@ -256,9 +340,9 @@ export class CICDService extends EventEmitter {
     return graph;
   }
 
-  private async executeJob(runId: string, jobId: string, job: WorkflowJob, executionMode: 'simulation' | 'real' = 'simulation'): Promise<void> {
+  private async executeJob(runId: string, jobId: string, job: WorkflowJob, executionMode: 'simulation' | 'real' = 'simulation'): Promise<JobRun | undefined> {
     const run = this.runs.get(runId);
-    if (!run) return;
+    if (!run) return undefined;
     
     const jobRun: JobRun = {
       id: `${runId}-${jobId}`,
@@ -301,6 +385,7 @@ export class CICDService extends EventEmitter {
     jobRun.duration = jobRun.endTime.getTime() - (jobRun.startTime?.getTime() || 0);
     
     this.emit('job:completed', { runId, jobRun });
+    return jobRun;
   }
 
   private async executeStep(runId: string, jobRun: JobRun, step: WorkflowStep, index: number, executionMode: 'simulation' | 'real' = 'simulation'): Promise<void> {
@@ -457,7 +542,7 @@ export class CICDService extends EventEmitter {
         return { stdout: String(stdout), stderr: String(stderr) };
       } catch (error: any) {
         // 直し回12（推奨B）：許可された実コマンドの失敗は失敗として返す（以前は模擬の成功結果に置き換えていた）。
-        // 模擬は simulation モードを明示的に選んだときだけ使う
+        // 許可コマンドの実行失敗から模擬へは切り替えない（許可パターン外の行は下の else で従来どおり模擬にする）
         const detail = [
           error?.code !== undefined ? `code ${error.code}` : null,
           error?.signal ? `signal ${error.signal}` : null,
