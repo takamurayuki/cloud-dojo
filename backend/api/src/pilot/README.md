@@ -62,7 +62,13 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   書き換え（trim 等）はしない。前後の空白・`\`・制御文字を含むパスや、空・空白だけのパスは、解釈を一致させられないため判定不能として
   拒否する（既存コンテナでは保護対象にする）。空・空白だけのパスは3経路とも読み飛ばさない（compose の短い書式 `:/x`・長い書式の
   `source: ""`、既存コンテナの空の `Mounts[].Source`、空の `hostPath.path`）。そのため、Source が空のマウント（tmpfs 等）を持つ
-  通常のコンテナも、この API からは実行・削除・停止・起動できない（判定不能を許可側に倒さない）。ラベルもソケットも持たない通常のリソースは従来どおり操作できる。
+  通常のコンテナも、この API からは実行・削除・停止・起動できない（判定不能を許可側に倒さない）。
+  文字列でないパス（欠落・null・数値・オブジェクト等）も読み飛ばさない。既存コンテナの `Mounts[]` では、種別（`Type`）が
+  bind・npipe・欠落・未知のものは、Source が文字列でなければ判定不能として保護する。Source にホストのパスを持たないことが正常な
+  volume・tmpfs・image・cluster は、Source の欠落・null を通し、数値・オブジェクト等の想定外の型は判定不能として保護する。
+  `Mounts` が配列でない、または要素がオブジェクトでない場合も保護する。compose の長い書式では、`source`（`src`）が文字列でなければ
+  type によらず拒否し、type が bind・npipe で `source` が欠落・null のものも拒否する（volume の匿名ボリューム・tmpfs の source 無しは通す）。
+  ラベルもソケットも持たない通常のリソースは従来どおり操作できる。
   対象の経路：
   - `POST /api/network/exec`、`DELETE /api/docker/containers/:id`、`POST /api/docker/containers/:id/stop`・`start`
   - `POST /api/network/lab/create`（固定名 `network-node-<i>` の既存コンテナ削除。何も作らないうちに拒否する）。

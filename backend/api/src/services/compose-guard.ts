@@ -310,7 +310,17 @@ export function inspectComposeDefinition(composeYaml: string, env: SocketCheckEn
         // 長い書式：type が bind でなくても source がホストパスの形なら判定する（見た目の type で見逃さない）
         const src = vol.source ?? vol.src;
         // 直し回8（必須1）：空・空白だけの source も判定不能として拒否する（shortSyntaxBindSource が '' を返すため null と比べる）
-        if (typeof src === 'string' && (vol.type === 'bind' || shortSyntaxBindSource(`${src}:x`) !== null)) checkPath(name, 'volumes', src);
+        if (typeof src === 'string') {
+          if (vol.type === 'bind' || shortSyntaxBindSource(`${src}:x`) !== null) checkPath(name, 'volumes', src);
+        } else if (src !== undefined && src !== null) {
+          // 直し回9（必須）：文字列でない source（数値・オブジェクト・配列・真偽値等）は、type によらず判定不能として拒否する
+          // （checkPath が「文字列でないため判定できない」を記録する）
+          checkPath(name, 'volumes', src);
+        } else if (vol.type === 'bind' || vol.type === 'npipe') {
+          // 直し回9（必須）：ホストのパスを元に持つ種別で source が欠落・null のものも、元を判定できないため拒否する。
+          // volume（匿名ボリューム）・tmpfs 等は source が無いことが正常なので従来どおり通す
+          out.push({ service: name, field: 'volumes', detail: `type: ${vol.type} の source が無い（欠落・null）ため、元を判定できない` });
+        }
       }
     }
 

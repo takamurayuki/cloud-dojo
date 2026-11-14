@@ -24,6 +24,13 @@
  * 直し回8（必須1）：空文字列・空白だけの Source も読み飛ばさず、判定不能として同じに保護する（compose の bind・
  * Kubernetes の hostPath と同じ規則）。そのため、Source が空のマウント（tmpfs 等）を持つ通常のコンテナも、
  * この API からは実行・削除・停止・起動できない（判定不能を許可側に倒さない）。
+ * 直し回9（必須）：文字列でない Source（欠落・null・数値・オブジェクト等）も読み飛ばさない。扱いはマウント種別（Type）で決める
+ * （nonStringSourceReason）。
+ * - bind・npipe（ホストのパスを元に持つ種別）、および Type が欠落・文字列でない・未知の種別：判定不能として保護する。
+ * - volume・tmpfs・image・cluster（Source にホストのパスを持たないことが正常な種別）：Source の欠落・null は通す
+ *   （ホストのパスが無いことは異常ではない）。数値・オブジェクト等の想定外の型は判定不能として保護する。
+ * - Source が文字列の場合は種別によらず従来どおり共有関数で判定する（空文字列は直し回8のとおり判定不能）。
+ * - Mounts が配列でない、または要素がオブジェクトでない場合も判定不能として保護する。
  *
  * 名前で指定された場合、inspect の後に同じ名前が別のコンテナに付け替えられても対象がずれないよう、
  * 以後の操作は inspect で確かめた完全な ID に対して行う（resolveUnprotectedContainer の戻り値を使う）。
@@ -62,21 +69,56 @@ export class DockerSocketContainerProtectedError extends PilotLabProtectedError 
   }
 }
 
-/** inspect・listContainers の Mounts の要素（必要な項目だけ） */
+/** inspect・listContainers の Mounts の要素（必要な項目だけ。Docker の応答は検証前のため、型は想定外でありうる） */
 export interface MountLike {
-  Type?: string;
-  Source?: string;
-  Destination?: string;
+  Type?: unknown;
+  Source?: unknown;
+  Destination?: unknown;
 }
 
-/** Mounts のうち Docker ソケット（compose の検査と同じ基準）を元に持つものがあれば理由を返す。無ければ null */
-export function dockerSocketMountReason(mounts: MountLike[] | null | undefined): string | null {
-  for (const m of mounts ?? []) {
+/**
+ * Source にホストのパスを持たないことが正常なマウント種別（直し回9）。これらに限り、Source の欠落・null を通す。
+ * bind・npipe はホストのパスを元に持つため含めない。ここに無い種別（未知の種別を含む）は、Source が文字列でなければ判定不能とする
+ */
+export const SOURCELESS_MOUNT_TYPES: ReadonlySet<string> = new Set(['volume', 'tmpfs', 'image', 'cluster']);
+
+const describeValue = (v: unknown) => (v === undefined ? '欠落' : v === null ? 'null' : Array.isArray(v) ? '配列' : typeof v);
+
+/**
+ * Source が文字列でないマウントの扱い（直し回9 必須）。通してよければ null、判定不能なら理由を返す
+ */
+export function nonStringSourceReason(m: MountLike): string | null {
+  const type = m.Type;
+  const src = m.Source;
+  if (typeof type === 'string' && SOURCELESS_MOUNT_TYPES.has(type)) {
+    if (src === undefined || src === null) return null;
+    return `種別 ${type} の Source が想定外の型（${describeValue(src)}）のため、指すものを判定できない（判定不能として保護する）`;
+  }
+  const typeText = typeof type === 'string' ? `種別 ${type}` : `種別が${describeValue(type)}`;
+  return `${typeText}のマウントの Source が文字列でない（${describeValue(src)}）ため、指すものを判定できない（判定不能として保護する）`;
+}
+
+/** Mounts のうち Docker ソケット（compose の検査と同じ基準）を元に持つもの、または判定不能なものがあれば理由を返す。無ければ null */
+export function dockerSocketMountReason(mounts: unknown): string | null {
+  if (mounts === undefined || mounts === null) return null;
+  // 直し回9（必須）：Mounts が配列でない・要素がオブジェクトでない場合も、読み飛ばさず判定不能とする
+  if (!Array.isArray(mounts)) return `Mounts が配列でない（${describeValue(mounts)}）ため判定できない（判定不能として保護する）`;
+  for (const m of mounts as unknown[]) {
+    if (typeof m !== 'object' || m === null || Array.isArray(m)) {
+      return `Mounts の要素がオブジェクトでない（${describeValue(m)}）ため判定できない（判定不能として保護する）`;
+    }
+    const mount = m as MountLike;
+    const dest = typeof mount.Destination === 'string' ? mount.Destination : '?';
+    // 直し回9（必須）：文字列でない Source は種別ごとに扱う（bind 等は判定不能として保護、volume・tmpfs 等の欠落・null は通す）
+    if (typeof mount.Source !== 'string') {
+      const reason = nonStringSourceReason(mount);
+      if (reason) return `(${describeValue(mount.Source)}) → ${dest}: ${reason}`;
+      continue;
+    }
     // 直し回8（必須1）：空文字列・空白だけの Source も読み飛ばさず共有関数に渡す（判定不能として保護対象にする。
     // tmpfs 等の Source が空のマウントを持つコンテナも、この API からは操作できなくなる）
-    if (typeof m?.Source !== 'string') continue;
-    const reason = dockerSocketReason(m.Source);
-    if (reason) return `${m.Source} → ${m.Destination ?? '?'}: ${reason}`;
+    const reason = dockerSocketReason(mount.Source);
+    if (reason) return `${mount.Source} → ${dest}: ${reason}`;
   }
   return null;
 }
@@ -85,7 +127,7 @@ export function dockerSocketMountReason(mounts: MountLike[] | null | undefined):
  * 操作してよいコンテナかを確かめる。パイロットのラボ（ラベル）なら PilotLabProtectedError、Docker ソケットを
  * マウントしていれば DockerSocketContainerProtectedError を投げる。info は inspect または listContainers の要素
  */
-export function assertContainerOperable(info: { Id: string; Labels?: Record<string, string> | null; Mounts?: MountLike[] | null }): void {
+export function assertContainerOperable(info: { Id: string; Labels?: Record<string, string> | null; Mounts?: unknown }): void {
   if (isPilotLabLabels(info.Labels)) throw new PilotLabProtectedError(info.Id);
   const reason = dockerSocketMountReason(info.Mounts);
   if (reason) throw new DockerSocketContainerProtectedError(info.Id, reason);
@@ -103,7 +145,7 @@ export function isPilotLabLabels(labels: Record<string, string> | null | undefin
  */
 export async function resolveUnprotectedContainer(docker: Docker, idOrName: string): Promise<Docker.Container> {
   const info = await docker.getContainer(idOrName).inspect();
-  assertContainerOperable({ Id: info.Id, Labels: info.Config?.Labels, Mounts: info.Mounts as MountLike[] | undefined });
+  assertContainerOperable({ Id: info.Id, Labels: info.Config?.Labels, Mounts: info.Mounts as unknown });
   return docker.getContainer(info.Id);
 }
 
