@@ -71,17 +71,26 @@ const navItems = IS_PILOT ? allNavItems.filter((item) => !PILOT_HIDDEN.includes(
 
 const NAV_PIN_KEY = 'nav-pinned';
 
-const getPinnedState = () => {
-  const stored = localStorage.getItem(NAV_PIN_KEY);
-  return stored === 'true';
+// localStorage は無効化・容量超過・プライベートモード等で参照や読み書きが例外になり得る。
+// 例外はここで捕捉し、ナビの描画を止めない（読み取りは既定の「固定しない」、保存は諦めて表示上の状態だけ切り替える）
+const getPinnedState = (): boolean => {
+  try {
+    return window.localStorage.getItem(NAV_PIN_KEY) === 'true';
+  } catch {
+    return false;
+  }
 };
 
 const setPinnedState = (pinned: boolean) => {
-  localStorage.setItem(NAV_PIN_KEY, pinned.toString());
+  try {
+    window.localStorage.setItem(NAV_PIN_KEY, pinned.toString());
+  } catch {
+    // 保存できなくても、この画面での固定・解除はそのまま効く（次回は既定に戻る）
+  }
 };
 
 export function Navigation() {
-  const [isPinned, setIsPinned] = useState(getPinnedState());
+  const [isPinned, setIsPinned] = useState(getPinnedState);
   const [isHovered, setIsHovered] = useState(false);
   const hoverTimerRef = useRef<number | null>(null);
 

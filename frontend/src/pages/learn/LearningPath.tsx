@@ -176,13 +176,14 @@ export function LearningPath() {
                       {course.lessons} lessons
                     </span>
                     <span>{course.duration}</span>
+                    {/* レベル表示：淡い背景（-500/10）の上で両テーマとも 4.5:1 以上（ライト -800：6.5〜7.8、ダーク -300：9.1〜11.2） */}
                     <span
                       className={`px-2 py-1 rounded-md text-xs font-medium ${
                         course.level === 'Beginner'
-                          ? 'bg-green-500/10 text-green-600'
+                          ? 'bg-green-500/10 text-green-800 dark:text-green-300'
                           : course.level === 'Intermediate'
-                            ? 'bg-blue-500/10 text-blue-600'
-                            : 'bg-purple-500/10 text-purple-600'
+                            ? 'bg-blue-500/10 text-blue-800 dark:text-blue-300'
+                            : 'bg-purple-500/10 text-purple-800 dark:text-purple-300'
                       }`}
                     >
                       {course.level}
