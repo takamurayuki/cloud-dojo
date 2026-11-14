@@ -96,7 +96,12 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     ネットワーク・コンテナを何も作成・停止・削除しない。確認の後、ネットワークの作成途中で失敗した場合（作成中の 409 の
     再確認で拒否した等）は、コンテナは作らず、この回に作成したネットワークを作成時の ID で削除する。削除できなかったものは
     ジョブの失敗理由とログに残存として出す。コンテナは確かめた（または作成した）ネットワークの ID で接続する（名前では接続しない）。
-    以前の版が作ったラベル無しのネットワークは、一度 `docker network rm <project>_<network>` で削除すると次回から作り直される
+    以前の版が作ったラベル無しのネットワークは、一度 `docker network rm <project>_<network>` で削除すると次回から作り直される。
+    down・down-volumes のネットワーク削除は、404（既に無い）だけを削除済みとし、それ以外（使用中＝`has active endpoints`・500・通信エラー等）は
+    残存として記録したうえで残りのネットワークの削除も試みる。残存が1つでもあればジョブを失敗にし、失敗理由とログに残ったネットワークの
+    名前・ID・理由・復旧手順（`docker network rm <ID>`）と、削除できたものを出す（以前は使用中を警告だけにして成功としていた）。
+    down-volumes は、ネットワークが残ってもコンテナは削除済みなのでボリュームの削除は続け、そのうえでジョブを失敗にする
+    （保護による拒否・コンテナの削除失敗で down が中止した場合は、従来どおりボリュームに触れない）
   - compose の定義（`POST /api/compose/up`）：ホストを操作できる設定を含む定義は、受付時に 400 `COMPOSE_DEFINITION_REJECTED`
     で拒否してキューに入れない。Worker 側の compose up でも同じ検査をし、Docker を何も操作しないうちにジョブを失敗にする。
     拒否するのは次の5つ（判定は YAML の解析結果と、この API が実際に Docker へ渡す bind mount に対して行う。パスは `..`・
@@ -130,7 +135,7 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
 - Node 22.5 以上が必要（`node:sqlite` を使う）。保存先の既定は `backend/api/.data/pilot.sqlite`（git 管理外）。
 - 既定ポートは既存 API と同じ 4000 なので、既存 API（`pnpm dev:api`）とは同時に起動しない。既存 API を起動した場合も `/api/pilot` に同じ経路が登録される（node:sqlite が無い Node ではパイロット経路だけ無効化し、既存機能は止めない）。
 - ラボは Docker が必要。Docker が無いとラボ API は `503 DOCKER_NOT_FOUND` を返す。画面では「フィクスチャで実行（練習用・完了不可）」を使える。
-- ラボのイメージ（`cloud-dojo-lab/n5-tcp:0.1`）は初回の起動時に `backend/api/labs/n5-tcp/` からビルドされる（ビルド時のみ外部取得あり。ラボのネットワークは internal）。
+- ラボのイメージ（`cloud-dojo-lab/n5-tcp:0.1`）は初回の起動時に `backend/api/labs/n5-tcp/` からビルドされる（ビルド時のみ外部取得あり。ラボのネットワークは internal）。イメージの有無の確認（inspect）は 404 だけを「未ビルド」とし、それ以外の失敗（500・通信エラー等）ではビルドせずにラボ操作を中止する（500 `LAB_ERROR`。message に確認できなかった理由が入る）。
 
 ## 構成
 

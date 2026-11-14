@@ -243,6 +243,45 @@ function describeRollback(r: NonNullable<ComposeSession['networkRollback']>): st
   return parts.join('。');
 }
 
+/** compose down（・down-volumes）の結果。削除できなかったネットワークは remainingNetworks に入る（直し回11 推奨） */
+export interface ComposeDownResult {
+  removedContainers: string[];
+  /** 削除したネットワーク（削除時に既に無かった 404 も含む） */
+  removedNetworks: { name: string; id: string }[];
+  /** 削除できず残っているネットワーク（名前・ID・理由・復旧手順） */
+  remainingNetworks: { name: string; id: string; error: string; recovery: string }[];
+  /** down-volumes で削除したボリューム */
+  removedVolumes?: string[];
+}
+
+/**
+ * compose down で削除できなかったネットワークが残った（直し回11 推奨）。他の対象の削除は試み終えている。
+ * 成功とはせず、残存（名前・ID・理由・復旧手順）と削除できたものを result に持つ
+ */
+export class ComposeDownResidueError extends Error {
+  readonly code = 'COMPOSE_DOWN_RESIDUE';
+  constructor(
+    readonly result: ComposeDownResult,
+    /** down-volumes のボリューム削除で起きた失敗（あれば） */
+    readonly volumeError?: string,
+  ) {
+    super(describeDownResidue(result, volumeError));
+    this.name = 'ComposeDownResidueError';
+  }
+}
+
+function describeDownResidue(r: ComposeDownResult, volumeError?: string): string {
+  const parts = [
+    `compose down で削除できなかったネットワークが残っています（${r.remainingNetworks.map((n) => `${n.name}（${n.id}）: ${n.error}`).join('; ')}）。` +
+      `復旧手順：${r.remainingNetworks.map((n) => n.recovery).join('; ')} で削除してください（接続中のコンテナがあれば、先に docker rm -f でそのコンテナを削除する）`,
+    `削除したもの：コンテナ ${r.removedContainers.length > 0 ? r.removedContainers.join(', ') : 'なし'}／ネットワーク ${
+      r.removedNetworks.length > 0 ? r.removedNetworks.map((n) => n.name).join(', ') : 'なし'
+    }${r.removedVolumes ? `／ボリューム ${r.removedVolumes.length > 0 ? r.removedVolumes.join(', ') : 'なし'}` : ''}`,
+  ];
+  if (volumeError) parts.push(`ボリュームの削除にも失敗しました（${volumeError}）`);
+  return parts.join('。');
+}
+
 export class DockerComposeService extends EventEmitter {
   private sessions: Map<string, ComposeSession> = new Map();
 
@@ -823,7 +862,8 @@ export class DockerComposeService extends EventEmitter {
     return result;
   }
 
-  async composeDown(projectName: string = 'cloud-dojo'): Promise<void> {
+  async composeDown(projectName: string = 'cloud-dojo'): Promise<ComposeDownResult> {
+    const result: ComposeDownResult = { removedContainers: [], removedNetworks: [], remainingNetworks: [] };
     try {
       // List all containers with the project prefix
       const containers = await docker.listContainers({ all: true });
@@ -871,6 +911,7 @@ export class DockerComposeService extends EventEmitter {
         
         // Remove container
         await container.remove();
+        result.removedContainers.push(containerName ?? containerInfo.Id);
         console.log(`🗑️ Removed: ${containerName}`);
         
         currentStep++;
@@ -892,20 +933,29 @@ export class DockerComposeService extends EventEmitter {
         message: 'Removing networks...',
       });
       
+      // 直し回11（推奨）：削除できなかったネットワークは残存として記録し、残りのネットワークの削除も試みる。
+      // 404（既に無い）は削除済みとする。それ以外（使用中＝has active endpoints・500・通信エラー等）は残存。
+      // 残存が1つでもあれば成功とはしない（以前は使用中を警告だけにして完了としていた）
       for (const networkInfo of projectNetworks) {
-        const network = docker.getNetwork(networkInfo.Id);
+        const entry = { name: networkInfo.Name, id: networkInfo.Id };
         try {
-          await network.remove();
+          await docker.getNetwork(networkInfo.Id).remove();
+          result.removedNetworks.push(entry);
           console.log(`✅ Removed network: ${networkInfo.Name}`);
-        } catch (networkError: any) {
-          // If network has active endpoints, log warning but don't fail
-          if (networkError.message?.includes('has active endpoints')) {
-            console.warn(`⚠️ Cannot remove network ${networkInfo.Name}: still has active endpoints`);
-          } else {
-            throw networkError;
+        } catch (networkError) {
+          if (isNotFound(networkError)) {
+            result.removedNetworks.push(entry);
+            continue;
           }
+          const message = networkError instanceof Error ? networkError.message : String(networkError);
+          result.remainingNetworks.push({ ...entry, error: message, recovery: `docker network rm ${networkInfo.Id}` });
+          console.error(
+            `⚠️ ネットワーク ${networkInfo.Name}（${networkInfo.Id}）を削除できず、残っています: ${message}。` +
+              `復旧手順：docker network rm ${networkInfo.Id} で削除してください（接続中のコンテナがあれば、先に docker rm -f でそのコンテナを削除する）`,
+          );
         }
       }
+      if (result.remainingNetworks.length > 0) throw new ComposeDownResidueError(result);
 
       this.emit('down:progress', {
         projectName,
@@ -918,8 +968,19 @@ export class DockerComposeService extends EventEmitter {
 
       // Note: We don't remove volumes by default (like docker-compose down)
       // Use composeDownVolumes() for that
-
+      return result;
     } catch (error: any) {
+      if (error instanceof ComposeDownResidueError) {
+        // 残存は名前・ID・復旧手順つきで知らせる（成功した分の削除は済んでいる）
+        this.emit('down:progress', {
+          projectName,
+          progress: 100,
+          status: 'error',
+          message: error.message,
+          remaining: error.result.remainingNetworks,
+        });
+        throw error;
+      }
       this.emit('down:progress', {
         projectName,
         progress: 0,
@@ -930,19 +991,42 @@ export class DockerComposeService extends EventEmitter {
     }
   }
 
-  async composeDownVolumes(projectName: string = 'cloud-dojo'): Promise<void> {
-    await this.composeDown(projectName);
+  /**
+   * down の後にプロジェクトのボリュームを削除する。直し回11（推奨）：down でネットワークが残っても（ComposeDownResidueError）、
+   * コンテナは削除済みなのでボリュームの削除は続ける（成功した分の後始末は止めない）。そのうえで残存を伝える例外を投げ、
+   * 成功とはしない（直し回10 の /lab/cleanup と同じく、全対象を試みてから残存を明示する）。down がそれ以外の理由で
+   * 失敗した場合（保護による拒否・コンテナの削除失敗等）は、従来どおりボリュームには触れない
+   */
+  async composeDownVolumes(projectName: string = 'cloud-dojo'): Promise<ComposeDownResult> {
+    let residue: ComposeDownResidueError | null = null;
+    let result: ComposeDownResult;
+    try {
+      result = await this.composeDown(projectName);
+    } catch (error) {
+      if (!(error instanceof ComposeDownResidueError)) throw error;
+      residue = error;
+      result = error.result;
+    }
 
     // Remove volumes
-    const volumes = await docker.listVolumes();
-    if (volumes.Volumes) {
-      for (const volumeInfo of volumes.Volumes) {
-        if (volumeInfo.Name?.startsWith(`${projectName}_`)) {
-          const volume = docker.getVolume(volumeInfo.Name);
-          await volume.remove();
+    result.removedVolumes = [];
+    try {
+      const volumes = await docker.listVolumes();
+      if (volumes.Volumes) {
+        for (const volumeInfo of volumes.Volumes) {
+          if (volumeInfo.Name?.startsWith(`${projectName}_`)) {
+            const volume = docker.getVolume(volumeInfo.Name);
+            await volume.remove();
+            result.removedVolumes.push(volumeInfo.Name);
+          }
         }
       }
+    } catch (error) {
+      if (!residue) throw error;
+      throw new ComposeDownResidueError(result, error instanceof Error ? error.message : String(error));
     }
+    if (residue) throw new ComposeDownResidueError(result);
+    return result;
   }
 
   async getComposeStatus(projectName: string = 'cloud-dojo'): Promise<Record<string, any>> {

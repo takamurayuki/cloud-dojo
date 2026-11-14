@@ -307,17 +307,15 @@ export async function initializeWorkers(fastify?: FastifyInstance) {
           await job.updateProgress(10);
 
           // Execute docker-compose down
-          if (removeVolumes) {
-            await composeService.composeDownVolumes(projectName);
-          } else {
-            await composeService.composeDown(projectName);
-          }
+          // 直し回11（推奨）：ネットワークが残ったら ComposeDownResidueError（残存の名前・ID・復旧手順を含む）でジョブを失敗にする
+          const result = removeVolumes ? await composeService.composeDownVolumes(projectName) : await composeService.composeDown(projectName);
 
           await job.updateProgress(100);
 
           return {
             success: true,
             projectName,
+            result,
             message: 'Compose project stopped and removed successfully',
           };
         } catch (error: any) {

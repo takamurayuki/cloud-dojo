@@ -118,6 +118,17 @@ export class LabUnavailableError extends Error {
   }
 }
 
+/** ラボイメージの有無を確かめられなかった（inspect が 404 以外で失敗）。ビルドには進まない */
+export class LabImageCheckError extends Error {
+  readonly code = 'LAB_IMAGE_CHECK_FAILED';
+  constructor(cause: unknown) {
+    const status = (cause as { statusCode?: number } | null)?.statusCode;
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`ラボイメージ ${LAB_IMAGE} の有無を確認できないため、ビルドせずに中止しました（${status !== undefined ? `HTTP ${status}: ` : ''}${detail}）`);
+    this.name = 'LabImageCheckError';
+  }
+}
+
 export interface CleanupResult {
   /** 後始末（走っていた単位の終了を含む）が実際に完了し、停止・削除が全て成功したか */
   ok: boolean;
@@ -608,12 +619,15 @@ export class DockerLabRunner implements LabRunner {
   }
 
   private async ensureImage(b: OpBudget) {
+    // 直し回11：404（イメージが無い）だけを「未ビルド」とする。それ以外の失敗（500・通信エラー等）は確認できない
+    // ので、ビルドに進まずラボ操作を中止して呼び出し元へ伝える（API は 500 LAB_ERROR）
     const present = await b.step('image-inspect', this.limits.pingMs, async () => {
       try {
         await this.docker.getImage(LAB_IMAGE).inspect();
         return true;
-      } catch {
-        return false;
+      } catch (e) {
+        if (statusOf(e) === 404) return false;
+        throw new LabImageCheckError(e);
       }
     });
     if (present) return;
