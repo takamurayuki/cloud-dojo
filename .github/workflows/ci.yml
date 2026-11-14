@@ -118,6 +118,39 @@ jobs:
       - name: Build
         run: pnpm run build
 
+  # N5 パイロット（学習エンジン新経路）：単元バリデータ・判定器・API のテストと型・lint
+  # node:sqlite を使うため Node 22 以上で実行する
+  pilot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: 'pnpm-lock.yaml'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Pilot tests (validator / judge / API)
+        run: pnpm --filter cloud-dojo-api test:pilot
+
+      - name: Lint pilot sources
+        run: |
+          pnpm --filter cloud-dojo-api exec eslint src/pilot --ext .ts --max-warnings 0
+          pnpm --filter cloud-dojo-frontend exec eslint src/pages/units src/features/pilot --ext ts,tsx --max-warnings 0
+
+      - name: Frontend type check
+        run: pnpm --filter cloud-dojo-frontend type-check
+
   # Worker tests and build
   backend-worker:
     runs-on: ubuntu-latest

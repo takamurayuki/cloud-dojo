@@ -10,6 +10,7 @@ export const ROUTES = {
   CICD: '/cicd',
   LOGS: '/logs',
   LEARNING: '/learning',
+  UNIT_N5: '/units/n5-tcp',
 } as const;
 
 export const AI_CONFIG = {

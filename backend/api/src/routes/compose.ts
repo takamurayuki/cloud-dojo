@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
-import { composeService } from '../services/compose';
+import { assertComposeDefinitionSafe, composeService } from '../services/compose';
+import { ComposeDefinitionRejectedError } from '../services/compose-guard';
 import { addComposeUpTask, addComposeDownTask } from '../services/queue';
 
 export async function composeRoutes(fastify: FastifyInstance) {
@@ -15,10 +16,28 @@ export async function composeRoutes(fastify: FastifyInstance) {
         return reply.code(400).send({ error: 'composeYaml is required' });
       }
 
+      // ホストを操作できる設定（Docker ソケットの bind mount、privileged、host 名前空間、許可外の cap_add 等）を含む定義は、
+      // キューに入れずに 400 で拒否する（直し回5 必須。Worker 側の composeUp でも同じ検査をしてから作成する）
+      const project = projectName || 'cloud-dojo';
+      let parsed: ReturnType<typeof composeService.parseComposeYAML> | null = null;
+      try {
+        parsed = composeService.parseComposeYAML(composeYaml);
+      } catch {
+        parsed = null; // この API のパーサで読めない定義は従来どおり Worker 側の失敗にする（YAML の検査は下で行う）
+      }
+      try {
+        assertComposeDefinitionSafe(composeYaml, parsed ?? { version: '', services: {} }, project);
+      } catch (error) {
+        if (error instanceof ComposeDefinitionRejectedError) {
+          return reply.code(400).send({ error: error.message, code: error.code, violations: error.violations });
+        }
+        throw error;
+      }
+
       // Add to queue instead of executing directly
       const jobId = await addComposeUpTask({
         composeYaml,
-        projectName: projectName || 'cloud-dojo',
+        projectName: project,
       });
 
       return { 

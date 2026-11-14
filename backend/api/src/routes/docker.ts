@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { dockerService, BuildSession } from '../services/docker.js';
 import { addDockerBuildTask, addDockerRunTask } from '../services/queue.js';
+import { PilotLabProtectedError, protectedBody } from '../pilot/lab/protect';
 
 const buildSchema = z.object({
   dockerfile: z.string(),
@@ -138,6 +139,7 @@ export async function dockerRoutes(fastify: FastifyInstance) {
         containerId: id,
       };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       fastify.log.error({ error }, 'Failed to remove container');
       return reply.code(500).send({
         error: 'Failed to remove container',
@@ -178,6 +180,7 @@ export async function dockerRoutes(fastify: FastifyInstance) {
         containerId: id,
       };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       fastify.log.error({ error }, 'Failed to stop container');
       return reply.code(500).send({
         error: 'Failed to stop container',
@@ -197,6 +200,7 @@ export async function dockerRoutes(fastify: FastifyInstance) {
         containerId: id,
       };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       fastify.log.error({ error }, 'Failed to start container');
       return reply.code(500).send({
         error: 'Failed to start container',

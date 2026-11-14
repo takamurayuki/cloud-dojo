@@ -9,6 +9,7 @@ import {
   Network,
   GitBranch,
   GraduationCap,
+  FlaskConical,
   Pin,
   PinOff,
 } from 'lucide-react';
@@ -51,6 +52,12 @@ const navItems = [
     icon: GraduationCap,
     label: 'Learning Path',
     color: 'from-green-500 to-emerald-500',
+  },
+  {
+    to: ROUTES.UNIT_N5,
+    icon: FlaskConical,
+    label: 'N5 TCP接続',
+    color: 'from-emerald-500 to-teal-500',
   },
 ];
 

@@ -3,6 +3,14 @@ import { z } from 'zod';
 import Docker from 'dockerode';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import {
+  isNotFound,
+  isPilotLabLabels,
+  PilotLabProtectedError,
+  protectedBody,
+  resolveUnprotectedContainer,
+  resolveUnprotectedNetwork,
+} from '../pilot/lab/protect';
 
 const execAsync = promisify(exec);
 const docker = new Docker();
@@ -36,9 +44,107 @@ async function checkDockerStatus(): Promise<{ running: boolean; error?: string }
   }
 }
 
+/** /lab/create：同名の既存ネットワークがラボ用だと確かめられない（再利用しない） */
+class LabNetworkUnverifiedError extends Error {
+  readonly code = 'LAB_NETWORK_UNVERIFIED';
+  constructor(name: string, why: string) {
+    super(`ネットワーク ${name} は既にありますが、${why}ため、ネットワークラボには使いません。別の名前を指定するか、そのネットワークを確認してください`);
+    this.name = 'LabNetworkUnverifiedError';
+  }
+}
+
+/**
+ * 名前で指定されたネットワークが既にあれば inspect し、ネットワークラボ用であることを確かめて、確かめた完全な ID のハンドルを返す。
+ * 無ければ（404）null。条件：名前が完全に一致し、ラベル cloud-dojo=network-lab を持ち、パイロットのラベル（cloud-dojo.lab）を持たないこと。
+ * パイロットのラボなら PilotLabProtectedError（403）、それ以外の不一致は LabNetworkUnverifiedError（409）。inspect のその他の失敗はそのまま投げる。
+ */
+async function resolveReusableLabNetwork(name: string): Promise<Docker.Network | null> {
+  let info: { Id: string; Name?: string; Labels?: Record<string, string> | null };
+  try {
+    info = (await docker.getNetwork(name).inspect()) as typeof info;
+  } catch (error) {
+    if (isNotFound(error)) return null;
+    throw error;
+  }
+  if (isPilotLabLabels(info.Labels)) throw new PilotLabProtectedError(info.Id);
+  if (info.Name !== name) throw new LabNetworkUnverifiedError(name, `名前が一致しない（${info.Name ?? '不明'}）`);
+  if (info.Labels?.['cloud-dojo'] !== 'network-lab') throw new LabNetworkUnverifiedError(name, 'ネットワークラボのラベル（cloud-dojo=network-lab）が無い');
+  return docker.getNetwork(info.Id);
+}
+
+/**
+ * /lab/create：変更を始める前の存在確認（inspect）が 404 以外で失敗した（直し回10 必須）。
+ * 500・通信エラー等では対象のラベル・Mounts を確かめられないので、「存在しない」とは読み替えず、何も作成・削除せずに中止する
+ */
+class LabPrecheckFailedError extends Error {
+  readonly code = 'LAB_PRECHECK_FAILED';
+  constructor(target: string, cause: unknown) {
+    super(
+      `${target} の存在確認（inspect）に失敗したため、確かめられないまま変更しないよう、何も作成・削除せずに中止しました: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+    this.name = 'LabPrecheckFailedError';
+  }
+}
+
+/** 後始末で削除できなかったもの。名前・ID と、手で削除するための復旧手順を持つ（直し回6 推奨B） */
+interface LabCreateRemaining {
+  kind: 'container' | 'network';
+  name: string;
+  id: string;
+  error: string;
+  recovery: string;
+}
+
+/** 削除できなかったものの記録（復旧手順つき） */
+function remainingEntry(kind: 'container' | 'network', target: { name: string; id: string }, error: unknown): LabCreateRemaining {
+  return {
+    kind,
+    name: target.name,
+    id: target.id,
+    error: error instanceof Error ? error.message : String(error),
+    recovery: kind === 'container' ? `docker rm -f ${target.id}` : `docker network rm ${target.id}`,
+  };
+}
+
+/** 残存の説明文（応答の message・cleanup.message とログに使う）。lead は「この要求で作成した」等の対象の説明 */
+function describeLabRemaining(remaining: LabCreateRemaining[], lead = 'この要求で作成した'): string {
+  return (
+    `${lead}次のものを削除できず、残っています：${remaining
+      .map((r) => `${r.kind === 'container' ? 'コンテナ' : 'ネットワーク'} ${r.name}（${r.id}）: ${r.error}`)
+      .join('; ')}。` +
+    `復旧手順：${remaining.map((r) => r.recovery).join(' → ')} の順に実行して削除してください`
+  );
+}
+
+/** /lab/create の作成途中の失敗の後始末：この要求で作成したコンテナ、次にネットワークを ID で削除する */
+async function rollbackLabCreate(
+  network: { name: string; id: string },
+  containers: { name: string; id: string }[],
+): Promise<{ removed: string[]; remaining: LabCreateRemaining[]; message?: string }> {
+  const removed: string[] = [];
+  const remaining: LabCreateRemaining[] = [];
+  const attempt = async (kind: 'container' | 'network', target: { name: string; id: string }, op: () => Promise<unknown>) => {
+    try {
+      await op();
+      removed.push(target.id);
+    } catch (error) {
+      if (isNotFound(error)) removed.push(target.id);
+      else remaining.push(remainingEntry(kind, target, error));
+    }
+  };
+  for (const c of containers) await attempt('container', c, () => docker.getContainer(c.id).remove({ force: true }));
+  await attempt('network', network, () => docker.getNetwork(network.id).remove());
+  return remaining.length > 0 ? { removed, remaining, message: describeLabRemaining(remaining) } : { removed, remaining };
+}
+
 export async function networkRoutes(fastify: FastifyInstance) {
   // ネットワークラボ環境を作成
   fastify.post('/lab/create', async (request, reply) => {
+    // この要求で作成したネットワーク・コンテナの ID（作成途中で失敗したときの後始末に使う。直し回5 推奨B）
+    let createdNetwork: { name: string; id: string } | null = null;
+    const createdContainers: { name: string; id: string }[] = [];
     try {
       // Docker起動状態を確認
       const dockerStatus = await checkDockerStatus();
@@ -53,11 +159,39 @@ export async function networkRoutes(fastify: FastifyInstance) {
       const body = createNetworkLabSchema.parse(request.body);
       const { nodeCount, networkName } = body;
 
-      // Alpine イメージの確認とpull
+      // 固定名 network-node-<i> の既存コンテナは作り直しのため削除する。パイロットのラボ（ラベル cloud-dojo.lab）が
+      // その名前を持つ場合は、何も作成・削除しないうちに 403 で拒否する。削除は確かめた完全な ID に対して行う。
+      // 直し回10（必須）：「存在しない」とするのは inspect の 404 だけ。それ以外の失敗（500・通信エラー等）はラベル・Mounts を
+      // 確かめられないので、その時点で（何も作成・削除・pull しないうちに）LabPrecheckFailedError で中止する
+      const existingNodes: Array<Docker.Container | null> = [];
+      for (let i = 1; i <= nodeCount; i++) {
+        const nodeName = `network-node-${i}`;
+        try {
+          existingNodes.push(await resolveUnprotectedContainer(docker, nodeName));
+        } catch (error) {
+          if (error instanceof PilotLabProtectedError) throw error;
+          if (isNotFound(error)) {
+            existingNodes.push(null); // 存在しない
+            continue;
+          }
+          throw new LabPrecheckFailedError(`コンテナ ${nodeName}`, error);
+        }
+      }
+
+      // 同名のネットワークが既にあれば、ラボ用（ラベル cloud-dojo=network-lab・パイロットのラベル無し）であることを
+      // 確かめてから再利用する。確かめられなければ、何も作成・削除せずに拒否する（通常のコンテナを別用途のネットワークへ参加させない）
+      let reuseNetwork = await resolveReusableLabNetwork(networkName);
+
+      // Alpine イメージの確認とpull（直し回10：pull するのは inspect が 404 のときだけ。それ以外の失敗は何も変更せずに中止する）
+      let imageMissing = false;
       try {
         await docker.getImage('alpine:latest').inspect();
         fastify.log.info('Alpine image already exists');
       } catch (error) {
+        if (!isNotFound(error)) throw new LabPrecheckFailedError('イメージ alpine:latest', error);
+        imageMissing = true;
+      }
+      if (imageMissing) {
         fastify.log.info('Pulling alpine image...');
         await new Promise((resolve, reject) => {
           docker.pull('alpine:latest', (err: any, stream: any) => {
@@ -73,39 +207,47 @@ export async function networkRoutes(fastify: FastifyInstance) {
 
       // カスタムネットワークを作成
       let network;
-      try {
-        network = await docker.createNetwork({
-          Name: networkName,
-          Driver: 'bridge',
-          Internal: false,
-          Attachable: true,
-          Labels: {
-            'cloud-dojo': 'network-lab',
-          },
-        });
-      } catch (error: any) {
-        // ネットワークが既に存在する場合は取得
-        if (error.statusCode === 409) {
-          const networks = await docker.listNetworks({
-            filters: { name: [networkName] },
+      if (reuseNetwork) {
+        network = reuseNetwork;
+      } else {
+        try {
+          network = await docker.createNetwork({
+            Name: networkName,
+            Driver: 'bridge',
+            Internal: false,
+            Attachable: true,
+            Labels: {
+              'cloud-dojo': 'network-lab',
+            },
           });
-          network = docker.getNetwork(networks[0].Id);
-        } else {
-          throw error;
+          createdNetwork = { name: networkName, id: network.id };
+        } catch (error: any) {
+          // 確認の後に同名のネットワークが作られた場合（409）も、同じ確認を通ったものだけ再利用する
+          if (error.statusCode === 409) {
+            reuseNetwork = await resolveReusableLabNetwork(networkName);
+            if (!reuseNetwork) throw error;
+            network = reuseNetwork;
+          } else {
+            throw error;
+          }
         }
       }
+
+      // 接続には確かめた（または作成した）ネットワークの ID を使う（直し回5 推奨A：確認後に同名の別ネットワークへ
+      // 付け替わっても誤接続しない。確かめたものが消えていれば作成が失敗する）
+      const networkId: string = network.id;
 
       // 複数のLinuxコンテナを作成
       const containers = [];
       for (let i = 1; i <= nodeCount; i++) {
         const containerName = `network-node-${i}`;
 
-        // 既存のコンテナを削除
+        // 既存のコンテナを削除（上で確かめた ID に対して行う）。直し回10：無視するのは 404（確認後に消えた）だけ。
+        // それ以外の削除失敗は読み飛ばさずに作成を中止し、この要求で作成したものを後始末する（下の catch）
         try {
-          const existingContainer = docker.getContainer(containerName);
-          await existingContainer.remove({ force: true });
+          await existingNodes[i - 1]?.remove({ force: true });
         } catch (error) {
-          // コンテナが存在しない場合は無視
+          if (!isNotFound(error)) throw error;
         }
 
         const container = await docker.createContainer({
@@ -119,7 +261,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
           Tty: true,
           OpenStdin: true,
           HostConfig: {
-            NetworkMode: networkName,
+            NetworkMode: networkId,
             CapAdd: ['NET_ADMIN', 'NET_RAW'], // ネットワーク管理権限
           },
           Labels: {
@@ -128,13 +270,16 @@ export async function networkRoutes(fastify: FastifyInstance) {
           },
         });
 
+        createdContainers.push({ name: containerName, id: container.id });
+
         await container.start();
 
         const inspectData = await container.inspect();
+        const attached = inspectData.NetworkSettings.Networks ?? {};
         containers.push({
           id: container.id,
           name: containerName,
-          ipAddress: inspectData.NetworkSettings.Networks[networkName]?.IPAddress,
+          ipAddress: (attached[networkName] ?? Object.values(attached).find((n) => n?.NetworkID === networkId))?.IPAddress,
           nodeId: i,
         });
       }
@@ -146,10 +291,27 @@ export async function networkRoutes(fastify: FastifyInstance) {
         message: `Created ${nodeCount} network nodes`,
       };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
+      if (error instanceof LabNetworkUnverifiedError) return reply.code(409).send({ error: error.code, message: error.message });
+      if (error instanceof LabPrecheckFailedError) {
+        // 変更を始める前の中止なので、後始末の対象は無い（createdNetwork・createdContainers は空のまま）
+        fastify.log.error({ error }, 'Network lab precheck failed');
+        return reply.code(500).send({ error: error.code, message: error.message });
+      }
       fastify.log.error({ error }, 'Failed to create network lab');
+      // この要求でネットワークを作成した後に失敗した場合は、この要求で作成したコンテナとネットワークを、作成時の ID で削除する。
+      // 削除できなかったものは応答の cleanup.remaining とログに残存として明示する（再利用した既存のネットワークは削除しない）
+      const cleanup = createdNetwork ? await rollbackLabCreate(createdNetwork, createdContainers) : undefined;
+      const baseMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (cleanup?.message) {
+        // 名前・ID・復旧手順をログにも残す（直し回6 推奨B）
+        fastify.log.error({ remaining: cleanup.remaining }, `Network lab creation failed and created resources remain: ${cleanup.message}`);
+      }
       return reply.code(500).send({
         error: 'Failed to create network lab',
-        message: error instanceof Error ? error.message : 'Unknown error',
+        // 画面（NetworkBasics.tsx）は message をそのまま表示するので、残存があれば名前と復旧手順を付け足す
+        message: cleanup?.message ? `${baseMessage}。${cleanup.message}` : baseMessage,
+        ...(cleanup ? { cleanup } : {}),
       });
     }
   });
@@ -207,41 +369,73 @@ export async function networkRoutes(fastify: FastifyInstance) {
   // ネットワークラボ環境を削除
   fastify.delete('/lab/cleanup', async (request, reply) => {
     try {
-      // ラボのコンテナを停止・削除
+      // 対象（ラベル cloud-dojo=network-lab）を先に全て確かめる。パイロットのラボ（ラベル cloud-dojo.lab）を
+      // 併せ持つものが1つでもあれば、何も削除せずに 403 で拒否する。削除は確かめた完全な ID に対して行う
       const containers = await docker.listContainers({
         all: true,
         filters: {
           label: ['cloud-dojo=network-lab'],
         },
       });
-
-      await Promise.all(
-        containers.map(async (c) => {
-          const container = docker.getContainer(c.Id);
-          await container.remove({ force: true });
-        })
-      );
-
-      // ラボのネットワークを削除
       const networks = await docker.listNetworks({
         filters: {
           label: ['cloud-dojo=network-lab'],
         },
       });
+      const containerHandles: { name: string; id: string; handle: Docker.Container }[] = [];
+      for (const c of containers) {
+        try {
+          const handle = await resolveUnprotectedContainer(docker, c.Id);
+          containerHandles.push({ name: (c.Names?.[0] ?? c.Id).replace(/^\//, ''), id: c.Id, handle });
+        } catch (error) {
+          if (isNotFound(error)) continue; // 一覧の後に消えた
+          throw error;
+        }
+      }
+      const networkHandles: { name: string; id: string; handle: Docker.Network }[] = [];
+      for (const n of networks) {
+        try {
+          const handle = await resolveUnprotectedNetwork(docker, n.Id);
+          networkHandles.push({ name: n.Name ?? n.Id, id: n.Id, handle });
+        } catch (error) {
+          if (isNotFound(error)) continue;
+          throw error;
+        }
+      }
 
-      await Promise.all(
-        networks.map(async (n) => {
-          const network = docker.getNetwork(n.Id);
-          try {
-            await network.remove();
-          } catch (error) {
-            // ネットワークが使用中の場合は無視
-          }
-        })
-      );
+      // 直し回10：削除の失敗は読み飛ばさない。404（確認後に消えた）は削除済みとして扱い、それ以外（使用中・500・通信エラー等）は
+      // 残存として名前・ID・復旧手順を応答とログに出す（成功とは返さない）
+      const removed: string[] = [];
+      const remaining: LabCreateRemaining[] = [];
+      const attempt = async (kind: 'container' | 'network', target: { name: string; id: string }, op: () => Promise<unknown>) => {
+        try {
+          await op();
+          removed.push(target.id);
+        } catch (error) {
+          if (isNotFound(error)) removed.push(target.id);
+          else remaining.push(remainingEntry(kind, target, error));
+        }
+      };
+
+      // ラボのコンテナを停止・削除
+      await Promise.all(containerHandles.map((c) => attempt('container', c, () => c.handle.remove({ force: true }))));
+
+      // ラボのネットワークを削除
+      await Promise.all(networkHandles.map((n) => attempt('network', n, () => n.handle.remove())));
+
+      if (remaining.length > 0) {
+        const message = describeLabRemaining(remaining, 'ネットワークラボの');
+        fastify.log.error({ remaining }, `Network lab cleanup left resources: ${message}`);
+        return reply.code(500).send({
+          error: 'Failed to cleanup lab',
+          message,
+          cleanup: { removed, remaining, message },
+        });
+      }
 
       return { message: 'Network lab cleaned up successfully' };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       fastify.log.error({ error }, 'Failed to cleanup lab');
       return reply.code(500).send({
         error: 'Failed to cleanup lab',
@@ -256,7 +450,8 @@ export async function networkRoutes(fastify: FastifyInstance) {
       const body = execCommandSchema.parse(request.body);
       const { containerId, command } = body;
 
-      const container = docker.getContainer(containerId);
+      // パイロットのラボコンテナ（ラベル cloud-dojo.lab）には実行させない。以後は確かめた ID で操作する
+      const container = await resolveUnprotectedContainer(docker, containerId);
 
       const exec = await container.exec({
         Cmd: ['/bin/sh', '-c', command],
@@ -284,6 +479,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
         output: output.trim(),
       };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       fastify.log.error({ error }, 'Failed to execute command');
       return reply.code(500).send({
         error: 'Failed to execute command',
