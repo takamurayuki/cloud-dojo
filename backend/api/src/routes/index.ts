@@ -21,4 +21,17 @@ export function registerRoutes(fastify: FastifyInstance) {
   fastify.register(queueRoutes);
   fastify.register(learningRoutes, { prefix: '/api/learning' });
   fastify.register(networkRoutes, { prefix: '/api/network' });
+
+  // N5 パイロット（学習エンジン新経路）。node:sqlite が使えない Node では既存機能を止めずに無効化する
+  fastify.register(
+    async (f) => {
+      try {
+        const { createPilotPlugin } = await import('../pilot/app');
+        await f.register(createPilotPlugin().plugin);
+      } catch (e) {
+        f.log.warn({ err: e }, 'pilot routes disabled (node:sqlite unavailable?)');
+      }
+    },
+    { prefix: '/api/pilot' },
+  );
 }

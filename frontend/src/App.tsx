@@ -9,6 +9,7 @@ import { KubernetesDeploy } from '@/pages/k8s/KubernetesDeploy';
 import { CICDPipeline } from '@/pages/cicd/CICDPipeline';
 import { LearningPath } from '@/pages/learn/LearningPath';
 import { Login } from '@/pages/login/Login';
+import { UnitPage } from '@/pages/units/UnitPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, loading } = useAuth();
@@ -28,6 +29,15 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      {/* 学習エンジン新経路（N5 パイロット）。単一利用者構成のため認証を要求しない */}
+      <Route
+        path="/units/:unitId"
+        element={
+          <AppLayout>
+            <UnitPage />
+          </AppLayout>
+        }
+      />
       <Route
         path="/"
         element={

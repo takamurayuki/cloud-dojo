@@ -63,3 +63,6 @@ coverage/
 # Generated files
 prisma/migrations/
 *.gen.ts
+
+# Pilot SQLite data
+.data/
