@@ -1,6 +1,20 @@
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, FastifyReply } from 'fastify';
+import * as yaml from 'js-yaml';
 import { k8sService } from '../services/kubernetes';
 import { addK8sDeployTask } from '../services/queue';
+import { K8sInputError, parseTailQuery, validateManifestDocs, validateNamespace } from '../services/k8s-args';
+
+/**
+ * 入力が Kubernetes の名前として妥当でなければ 400 `K8S_INVALID_INPUT`（kubectl は起動しない）。それ以外は従来どおり 500。
+ * 直し回4補足1：namespace・name・kind 等をシェルに渡さないよう、services/kubernetes.ts は execFile で引数を分けて実行し、
+ * 入力は services/k8s-args.ts の規則で検証する。
+ */
+function sendError(reply: FastifyReply, error: unknown) {
+  if (error instanceof K8sInputError) {
+    return reply.code(400).send({ error: error.code, field: error.field, message: error.message });
+  }
+  return reply.code(500).send({ error: error instanceof Error ? error.message : String(error) });
+}
 
 export async function kubernetesRoutes(fastify: FastifyInstance) {
   // Check if kubectl is available
@@ -15,7 +29,7 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 
@@ -26,7 +40,7 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       return { namespaces };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 
@@ -42,6 +56,16 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
         return reply.code(400).send({ error: 'manifest is required' });
       }
 
+      // キューに入れる前に検証する（妥当でなければ 400 で、ジョブを作らない。Worker 側の applyManifest でも同じ検証をする）
+      validateNamespace(namespace || 'default');
+      let docs: unknown[];
+      try {
+        docs = yaml.loadAll(manifest) as unknown[];
+      } catch {
+        return reply.code(400).send({ error: 'manifest is not valid YAML' });
+      }
+      validateManifestDocs(docs as Parameters<typeof validateManifestDocs>[0]);
+
       // Add to queue
       const jobId = await addK8sDeployTask({
         manifest,
@@ -56,7 +80,7 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 
@@ -77,7 +101,7 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       return { success: true };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 
@@ -89,7 +113,7 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       return { pods };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 
@@ -101,7 +125,7 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       return { deployments };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 
@@ -113,7 +137,7 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       return { services };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 
@@ -126,13 +150,13 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       const logs = await k8sService.getPodLogs(
         name, 
         namespace || 'default',
-        tail ? parseInt(tail) : 100
+        parseTailQuery(tail)
       );
       
       return { logs };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 
@@ -149,7 +173,7 @@ export async function kubernetesRoutes(fastify: FastifyInstance) {
       return { session };
     } catch (error: any) {
       fastify.log.error(error);
-      return reply.code(500).send({ error: error.message });
+      return sendError(reply, error);
     }
   });
 }

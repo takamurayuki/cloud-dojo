@@ -1,9 +1,19 @@
 import { EventEmitter } from 'events';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
+import { promises as fs } from 'fs';
 import { promisify } from 'util';
 import * as yaml from 'js-yaml';
+import { validateKind, validateManifestDocs, validateNamespace, validateResourceName, validateTail } from './k8s-args';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/**
+ * kubectl をシェルを介さずに起動する（直し回4補足1）。引数は配列のまま渡すので、展開・連結・リダイレクトはされない。
+ * 入力由来の引数は、呼び出し側で k8s-args.ts の規則により検証してから渡す。
+ */
+function kubectl(args: string[]) {
+  return execFileAsync('kubectl', args, { shell: false, maxBuffer: 16 * 1024 * 1024 });
+}
 
 // Use mock mode if kubectl is not available or if explicitly enabled
 const USE_MOCK_MODE = process.env.K8S_MOCK_MODE === 'true' || process.env.K8S_MOCK_MODE === '1';
@@ -82,11 +92,11 @@ export class KubernetesService extends EventEmitter {
     
     try {
       // First check if kubectl is installed
-      await execAsync('kubectl version --client --short');
+      await kubectl(['version', '--client', '--short']);
       
       // Then check if we can connect to a cluster
       try {
-        await execAsync('kubectl cluster-info --request-timeout=2s');
+        await kubectl(['cluster-info', '--request-timeout=2s']);
       } catch (clusterError) {
         console.log('⚠️ kubectl installed but no cluster available, enabling mock mode');
         this.useMockMode = true;
@@ -107,7 +117,7 @@ export class KubernetesService extends EventEmitter {
     }
     
     try {
-      const { stdout } = await execAsync('kubectl config current-context');
+      const { stdout } = await kubectl(['config', 'current-context']);
       return stdout.trim();
     } catch (error: any) {
       throw new Error(`Failed to get current context: ${error.message}`);
@@ -120,7 +130,7 @@ export class KubernetesService extends EventEmitter {
     }
     
     try {
-      const { stdout } = await execAsync('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"');
+      const { stdout } = await kubectl(['get', 'namespaces', '-o', 'jsonpath={.items[*].metadata.name}']);
       return stdout.trim().split(' ').filter(Boolean);
     } catch (error: any) {
       throw new Error(`Failed to get namespaces: ${error.message}`);
@@ -128,6 +138,11 @@ export class KubernetesService extends EventEmitter {
   }
 
   async applyManifest(manifestYaml: string, namespace: string = 'default'): Promise<K8sDeploySession> {
+    // 入力の検証（妥当でなければ session も作らず、何も適用しない）
+    validateNamespace(namespace);
+    const parsedDocs = yaml.loadAll(manifestYaml) as K8sResource[];
+    validateManifestDocs(parsedDocs);
+
     const sessionId = `k8s-${Date.now()}`;
     const session: K8sDeploySession = {
       id: sessionId,
@@ -141,7 +156,7 @@ export class KubernetesService extends EventEmitter {
 
     try {
       // Parse YAML to extract resources
-      const docs = yaml.loadAll(manifestYaml) as K8sResource[];
+      const docs = parsedDocs;
       
       for (const doc of docs) {
         if (!doc || !doc.kind) continue;
@@ -169,14 +184,11 @@ export class KubernetesService extends EventEmitter {
       
       // Create temporary file for manifest
       const tempFile = `/tmp/k8s-manifest-${sessionId}.yaml`;
-      const fs = require('fs').promises;
       await fs.writeFile(tempFile, manifestYaml);
 
       try {
         // Apply the manifest
-        const { stdout, stderr } = await execAsync(
-          `kubectl apply -f ${tempFile} -n ${namespace}`
-        );
+        const { stdout, stderr } = await kubectl(['apply', '-f', tempFile, '-n', namespace]);
 
         console.log('✅ kubectl apply output:', stdout);
         if (stderr) console.log('⚠️ kubectl apply stderr:', stderr);
@@ -194,9 +206,15 @@ export class KubernetesService extends EventEmitter {
         // Check resource statuses
         for (const resource of session.resources) {
           try {
-            const { stdout: statusOut } = await execAsync(
-              `kubectl get ${resource.kind} ${resource.name} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'`
-            );
+            const { stdout: statusOut } = await kubectl([
+              'get',
+              resource.kind,
+              resource.name,
+              '-n',
+              namespace,
+              '-o',
+              'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
+            ]);
             
             resource.status = 'ready';
             console.log(`✅ ${resource.kind}/${resource.name} is ready`);
@@ -357,6 +375,9 @@ export class KubernetesService extends EventEmitter {
   }
 
   async deleteResource(kind: string, name: string, namespace: string = 'default'): Promise<void> {
+    validateKind(kind);
+    validateResourceName(name);
+    validateNamespace(namespace);
     if (this.useMockMode) {
       console.log(`🎭 MOCK: Deleting ${kind}/${name} in namespace ${namespace}`);
       // Remove from mock storage
@@ -375,7 +396,7 @@ export class KubernetesService extends EventEmitter {
     
     try {
       console.log(`🗑️ Deleting ${kind}/${name} in namespace ${namespace}`);
-      const { stdout } = await execAsync(`kubectl delete ${kind} ${name} -n ${namespace}`);
+      const { stdout } = await kubectl(['delete', kind, name, '-n', namespace]);
       console.log('✅ Delete output:', stdout);
     } catch (error: any) {
       throw new Error(`Failed to delete ${kind}/${name}: ${error.message}`);
@@ -383,14 +404,13 @@ export class KubernetesService extends EventEmitter {
   }
 
   async getPods(namespace: string = 'default'): Promise<PodInfo[]> {
+    validateNamespace(namespace);
     if (this.useMockMode) {
       return this.mockPods.get(namespace) || [];
     }
     
     try {
-      const { stdout } = await execAsync(
-        `kubectl get pods -n ${namespace} -o json`
-      );
+      const { stdout } = await kubectl(['get', 'pods', '-n', namespace, '-o', 'json']);
       
       const data = JSON.parse(stdout);
       const pods: PodInfo[] = data.items.map((item: any) => {
@@ -418,14 +438,13 @@ export class KubernetesService extends EventEmitter {
   }
 
   async getDeployments(namespace: string = 'default'): Promise<DeploymentInfo[]> {
+    validateNamespace(namespace);
     if (this.useMockMode) {
       return this.mockDeployments.get(namespace) || [];
     }
     
     try {
-      const { stdout } = await execAsync(
-        `kubectl get deployments -n ${namespace} -o json`
-      );
+      const { stdout } = await kubectl(['get', 'deployments', '-n', namespace, '-o', 'json']);
       
       const data = JSON.parse(stdout);
       const deployments: DeploymentInfo[] = data.items.map((item: any) => ({
@@ -449,14 +468,13 @@ export class KubernetesService extends EventEmitter {
   }
 
   async getServices(namespace: string = 'default'): Promise<ServiceInfo[]> {
+    validateNamespace(namespace);
     if (this.useMockMode) {
       return this.mockServices.get(namespace) || [];
     }
     
     try {
-      const { stdout } = await execAsync(
-        `kubectl get services -n ${namespace} -o json`
-      );
+      const { stdout } = await kubectl(['get', 'services', '-n', namespace, '-o', 'json']);
       
       const data = JSON.parse(stdout);
       const services: ServiceInfo[] = data.items.map((item: any) => ({
@@ -482,6 +500,9 @@ export class KubernetesService extends EventEmitter {
   }
 
   async getPodLogs(podName: string, namespace: string = 'default', tail: number = 100): Promise<string> {
+    validateResourceName(podName, 'pod name');
+    validateNamespace(namespace);
+    validateTail(tail);
     if (this.useMockMode) {
       // Return mock logs
       const logs = [
@@ -500,9 +521,7 @@ export class KubernetesService extends EventEmitter {
     }
     
     try {
-      const { stdout } = await execAsync(
-        `kubectl logs ${podName} -n ${namespace} --tail=${tail}`
-      );
+      const { stdout } = await kubectl(['logs', podName, '-n', namespace, `--tail=${tail}`]);
       return stdout;
     } catch (error: any) {
       throw new Error(`Failed to get logs for pod ${podName}: ${error.message}`);

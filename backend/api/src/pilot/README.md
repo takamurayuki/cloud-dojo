@@ -58,7 +58,14 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   - `DELETE /api/network/lab/cleanup`（ラベル `cloud-dojo=network-lab` の一括削除。対象に1つでもあれば何も削除せずに拒否する）
   - compose（`POST /api/compose/up` の同名コンテナ削除、`/api/compose/down`・`down-volumes` のコンテナ・ネットワーク削除。
     どちらもキューのジョブが失敗として終わる。up は、保護したサービスを作り直さず、他のサービスの起動は従来どおり続けたうえで
-    ジョブを失敗にする）
+    ジョブを失敗にする）。up の接続先ネットワーク `<project>_<network>` が既にあれば、名前の完全一致と、
+    このプロジェクトの compose ネットワークのラベル（この API が作成時に付ける `cloud-dojo=compose`・
+    `cloud-dojo.compose.project`・`cloud-dojo.compose.network`、または Docker Compose が付ける `com.docker.compose.project`・
+    `com.docker.compose.network`）を確かめた場合だけ接続する。確かめられなければ（パイロットのラベル、`cloud-dojo=network-lab`
+    等の別用途、ラベル無しを含む）ネットワーク・コンテナを何も作成・停止・削除せずにジョブを失敗にする。
+    以前の版が作ったラベル無しのネットワークは、一度 `docker network rm <project>_<network>` で削除すると次回から作り直される
+  - Kubernetes（`/api/k8s/*`）：namespace・name・kind・tail を Kubernetes の名前の規則（RFC 1123 等）で検証し、
+    妥当でなければ 400 `K8S_INVALID_INPUT` で kubectl を起動しない。kubectl はシェルを介さず（execFile）引数を分けて起動する
   - CI/CD の real 実行（`POST /api/cicd/run` の `executionMode: real`）：許可パターン（`echo …`、`node`・`npm`・`pnpm`・
     `docker`・`git` の `--version`、`ls`、`pwd`、`date`、`whoami`）と引数まで完全に一致する行だけを、シェルを介さずに
     （execFile）実行する。シェルのメタ文字（`; & | $ ( ) < >`、バッククォート、改行、バックスラッシュ）を含む行は実行せずに

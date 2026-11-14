@@ -3,7 +3,10 @@
  * 適用先：/api/network/exec、/api/network/lab/create（固定名の既存コンテナ削除）、DELETE /api/network/lab/cleanup、
  * /api/docker/containers/:id の削除・停止・起動、compose（up の同名コンテナ削除、down のコンテナ・ネットワーク削除）。
  * /lab/create の既存ネットワーク再利用（routes/network.ts の resolveReusableLabNetwork）。
+ * compose up の既存ネットワークへの接続（services/compose.ts の resolveComposeNetwork）。
  * CI/CD の real 実行はシェルを介さない完全一致の許可パターンに限る（services/cicd-command.ts）ので、docker の操作には届かない。
+ * /api/k8s/* は入力を Kubernetes の名前の規則で検証し、kubectl をシェルを介さずに起動する（services/k8s-args.ts）ので、
+ * 別のコマンド（docker 等）は起動できない。
  *
  * 通常サーバはパイロットと既存 API を同じプロセスに登録するため、既存 API が任意のコンテナ ID を受け取ると、
  * パイロットの排他（lock.ts）を通らずにラボのコンテナで sysctl を変えたり証拠ファイルを書き換えたり、

@@ -1,8 +1,70 @@
 import Docker from 'dockerode';
 import { EventEmitter } from 'events';
-import { isPilotLabLabels, PilotLabProtectedError } from '../pilot/lab/protect';
+import { isNotFound, isPilotLabLabels, PilotLabProtectedError } from '../pilot/lab/protect';
 
 const docker = new Docker();
+
+/**
+ * 直し回4補足2：compose up が作るネットワークに付けるラベル。既存の同名ネットワークは、これ（または Docker Compose 自身の
+ * 同じプロジェクト・ネットワークのラベル）を持つことを確かめてから接続する。確かめられなければ接続しない。
+ */
+export const COMPOSE_NETWORK_LABEL = 'cloud-dojo';
+export const COMPOSE_NETWORK_LABEL_VALUE = 'compose';
+export const COMPOSE_PROJECT_LABEL = 'cloud-dojo.compose.project';
+export const COMPOSE_NETWORK_NAME_LABEL = 'cloud-dojo.compose.network';
+
+/** 既存の同名ネットワークが compose 用と確かめられない。何も作成・接続せずに compose up を中止する */
+export class ComposeNetworkUnverifiedError extends Error {
+  readonly code = 'COMPOSE_NETWORK_UNVERIFIED';
+  constructor(
+    readonly networkName: string,
+    reason: string,
+  ) {
+    super(
+      `既存のネットワーク ${networkName} は compose 用と確かめられないため、接続しません（${reason}）。` +
+        `このプロジェクトのものなら、docker network rm ${networkName} で削除してからやり直してください`,
+    );
+    this.name = 'ComposeNetworkUnverifiedError';
+  }
+}
+
+/**
+ * `<project>_<network>` の既存ネットワークを inspect し、接続してよいか確かめる（/lab/create の resolveReusableLabNetwork と同じ方針）。
+ * - 無い（404）：null（呼び出し側で作成する）
+ * - パイロットのラボ（ラベル cloud-dojo.lab）：PilotLabProtectedError
+ * - 名前が完全には一致しない（ID の接頭辞で別のネットワークに解決された等）：ComposeNetworkUnverifiedError
+ * - ラベル cloud-dojo が compose 以外（network-lab 等、別用途のラボ）：ComposeNetworkUnverifiedError
+ * - 次のどちらかのラベルの組で、同じプロジェクト・ネットワーク名と確かめられたものだけ接続してよい
+ *   - この API が作成時に付けるもの：cloud-dojo=compose、cloud-dojo.compose.project、cloud-dojo.compose.network
+ *   - Docker Compose（docker compose up）が付けるもの：com.docker.compose.project、com.docker.compose.network
+ * - それ以外（ラベルの無いもの、以前の版のこの API が作ったものを含む）：ComposeNetworkUnverifiedError
+ */
+export async function resolveComposeNetwork(projectName: string, networkName: string): Promise<{ id: string } | null> {
+  const fullName = `${projectName}_${networkName}`;
+  let info: { Id: string; Name?: string; Labels?: Record<string, string> | null };
+  try {
+    info = (await docker.getNetwork(fullName).inspect()) as typeof info;
+  } catch (error) {
+    if (isNotFound(error)) return null;
+    throw error;
+  }
+  const labels = info.Labels ?? {};
+  if (isPilotLabLabels(labels)) throw new PilotLabProtectedError(info.Id);
+  if (info.Name !== fullName) throw new ComposeNetworkUnverifiedError(fullName, `名前が一致しない（${info.Name ?? '不明'}）`);
+  const purpose = labels[COMPOSE_NETWORK_LABEL];
+  if (purpose !== undefined && purpose !== COMPOSE_NETWORK_LABEL_VALUE) {
+    throw new ComposeNetworkUnverifiedError(fullName, `別用途のラベル（${COMPOSE_NETWORK_LABEL}=${purpose}）を持つ`);
+  }
+  const ours =
+    purpose === COMPOSE_NETWORK_LABEL_VALUE &&
+    labels[COMPOSE_PROJECT_LABEL] === projectName &&
+    labels[COMPOSE_NETWORK_NAME_LABEL] === networkName;
+  const dockerCompose = labels['com.docker.compose.project'] === projectName && labels['com.docker.compose.network'] === networkName;
+  if (!ours && !dockerCompose) {
+    throw new ComposeNetworkUnverifiedError(fullName, 'このプロジェクトの compose ネットワークのラベルが無い');
+  }
+  return { id: info.Id };
+}
 
 export interface ComposeService {
   name: string;
@@ -39,6 +101,8 @@ export interface ComposeSession {
   error?: string;
   /** パイロットのラボ（ラベル cloud-dojo.lab）のため停止・削除を拒否したサービス名。1つでもあればジョブは失敗にする */
   protectedRejections?: string[];
+  /** 既存の同名ネットワークを compose 用と確かめられず、接続しなかった理由。あればジョブは失敗にする（直し回4補足2） */
+  networkRejection?: string;
 }
 
 /** compose-up ジョブの入力（queue.ts の ComposeUpTask と同じ形） */
@@ -62,6 +126,7 @@ export async function runComposeUpJob(
   try {
     await updateProgress(10);
     const session = await service.composeUp(composeYaml, projectName);
+    if (session.networkRejection) throw new Error(session.networkRejection);
     if (session.protectedRejections && session.protectedRejections.length > 0) {
       const detail = session.protectedRejections.map((name) => `${name}: ${session.services[name]?.error ?? ''}`).join('; ');
       throw new Error(`パイロットのラボを保護するため、次のサービスの既存コンテナを停止・削除せずに中止しました（${detail}）`);
@@ -330,15 +395,43 @@ export class DockerComposeService extends EventEmitter {
       console.log('🚀 Starting services in order:', serviceOrder.join(' -> '));
 
       // Create network if needed
+      // 既存の同名ネットワークは、compose 用のラベルを確かめてから接続する（直し回4補足2）。先に全件を確かめ、
+      // 1つでも確かめられなければ、ネットワーク・コンテナを何も作成・停止・削除せずに中止する
       if (config.networks && Object.keys(config.networks).length > 0) {
-        for (const networkName of Object.keys(config.networks)) {
+        const networkNames = Object.keys(config.networks);
+        const missing: string[] = [];
+        try {
+          for (const networkName of networkNames) {
+            if (!(await resolveComposeNetwork(projectName, networkName))) missing.push(networkName);
+          }
+        } catch (error) {
+          if (error instanceof ComposeNetworkUnverifiedError || error instanceof PilotLabProtectedError) {
+            session.networkRejection = error.message;
+          }
+          throw error;
+        }
+        for (const networkName of missing) {
           try {
-            await docker.getNetwork(`${projectName}_${networkName}`).inspect();
-          } catch {
             await docker.createNetwork({
               Name: `${projectName}_${networkName}`,
-              Driver: 'bridge'
+              Driver: 'bridge',
+              Labels: {
+                [COMPOSE_NETWORK_LABEL]: COMPOSE_NETWORK_LABEL_VALUE,
+                [COMPOSE_PROJECT_LABEL]: projectName,
+                [COMPOSE_NETWORK_NAME_LABEL]: networkName,
+              },
             });
+          } catch (error) {
+            // 確認の後に同名のネットワークが作られた場合（409）も、同じ確認を通ったものだけ使う
+            if ((error as { statusCode?: number } | null)?.statusCode !== 409) throw error;
+            try {
+              if (!(await resolveComposeNetwork(projectName, networkName))) throw error;
+            } catch (recheckError) {
+              if (recheckError instanceof ComposeNetworkUnverifiedError || recheckError instanceof PilotLabProtectedError) {
+                session.networkRejection = recheckError.message;
+              }
+              throw recheckError;
+            }
           }
         }
       }

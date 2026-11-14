@@ -18,6 +18,10 @@ const stub = vi.hoisted(() => {
     removeNetwork: [] as string[],
     createNetwork: [] as string[],
     create: [] as string[],
+    /** 直し回4補足2：createNetwork に渡したラベル（ネットワーク名ごと） */
+    createNetworkLabels: [] as { name: string; labels?: Record<string, string> }[],
+    /** 直し回4補足2：createContainer に渡した NetworkMode（コンテナ名ごと） */
+    networkMode: [] as { name: string; mode?: string }[],
   };
   const containers: Record<string, { Id: string; Name: string; Labels: Record<string, string>; State?: string }> = {};
   const networks: Record<string, { Id: string; Name: string; Labels: Record<string, string> }> = {};
@@ -57,14 +61,16 @@ const stub = vi.hoisted(() => {
         calls.removeNetwork.push(idOrName);
       },
     }),
-    createNetwork: async (o: { Name: string }) => {
+    createNetwork: async (o: { Name: string; Labels?: Record<string, string> }) => {
       // 実際の Docker と同じく、同名のネットワークがあれば 409
       if (Object.values(networks).some((n) => n.Name === o.Name)) throw Object.assign(new Error('network exists'), { statusCode: 409 });
       calls.createNetwork.push(o.Name);
+      calls.createNetworkLabels.push({ name: o.Name, labels: o.Labels });
       return { id: `net-${o.Name}` };
     },
-    createContainer: async (spec: { name: string }) => {
+    createContainer: async (spec: { name: string; HostConfig?: { NetworkMode?: string } }) => {
       calls.create.push(spec.name);
+      calls.networkMode.push({ name: spec.name, mode: spec.HostConfig?.NetworkMode });
       return {
         id: `new-${spec.name}`,
         start: async () => undefined,
@@ -385,5 +391,108 @@ describe('直し回4（推奨B）：/lab/create は既存の同名ネットワ�
     expect(r.statusCode).toBe(200);
     expect(stub.calls.createNetwork).toEqual(['lab-network']);
     expect(r.json().networkId).toBe('net-lab-network');
+  });
+});
+
+const COMPOSE_NET_YAML = `version: '3.8'
+services:
+  web:
+    image: nginx
+  db:
+    image: postgres
+networks:
+  app:
+    driver: bridge
+`;
+
+describe('直し回4補足2：compose up は既存の同名ネットワークをラベルで確かめてから接続する', () => {
+  const up = async () => {
+    const { composeService, runComposeUpJob } = await import('../services/compose');
+    const quiet = [vi.spyOn(console, 'log').mockImplementation(() => undefined), vi.spyOn(console, 'error').mockImplementation(() => undefined)];
+    try {
+      return await runComposeUpJob(composeService, { composeYaml: COMPOSE_NET_YAML, projectName: 'proj' }).then(
+        (r) => ({ ok: true as const, r }),
+        (e: Error) => ({ ok: false as const, e }),
+      );
+    } finally {
+      quiet.forEach((q) => q.mockRestore());
+    }
+  };
+  /** 拒否したときは、ネットワーク・コンテナを何も作成・停止・削除していない */
+  const expectNothingTouched = () => {
+    expect(stub.calls.createNetwork).toHaveLength(0);
+    expect(stub.calls.create).toHaveLength(0);
+    expect(stub.calls.stop).toHaveLength(0);
+    expect(stub.calls.remove).toHaveLength(0);
+    expect(stub.calls.removeNetwork).toHaveLength(0);
+  };
+
+  it('ラボ用でない既存ネットワーク（ネットワークラボ cloud-dojo=network-lab）には接続せず、ジョブは失敗する', async () => {
+    stub.networks['labnet0101'] = { Id: 'labnet0101', Name: 'proj_app', Labels: { 'cloud-dojo': 'network-lab' } };
+    stub.containers['plainweb0101'] = { Id: 'plainweb0101', Name: '/proj_web', Labels: {} };
+    const res = await up();
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.e.message).toMatch(/Compose up failed: 既存のネットワーク proj_app は compose 用と確かめられない.*cloud-dojo=network-lab/);
+    expectNothingTouched();
+  });
+
+  it('ラベルの無い既存ネットワーク・別プロジェクトのラベルのネットワークにも接続しない', async () => {
+    const cases: Record<string, string>[] = [{}, { app: 'something-else' }, { 'cloud-dojo': 'compose', 'cloud-dojo.compose.project': 'other', 'cloud-dojo.compose.network': 'app' }, { 'com.docker.compose.project': 'other', 'com.docker.compose.network': 'app' }];
+    for (const labels of cases) {
+      for (const k of Object.keys(stub.networks)) delete stub.networks[k];
+      stub.networks['net0102'] = { Id: 'net0102', Name: 'proj_app', Labels: labels };
+      const res = await up();
+      expect(res.ok, JSON.stringify(labels)).toBe(false);
+      if (!res.ok) expect(res.e.message).toMatch(/compose 用と確かめられない/);
+    }
+    expectNothingTouched();
+  });
+
+  it('パイロットのラベルを持つ既存ネットワークには接続せず、ジョブは失敗する', async () => {
+    stub.networks['pilotnet0103'] = {
+      Id: 'pilotnet0103',
+      Name: 'proj_app',
+      Labels: { 'cloud-dojo': 'compose', 'cloud-dojo.compose.project': 'proj', 'cloud-dojo.compose.network': 'app', 'cloud-dojo.lab': 'n5-tcp' },
+    };
+    const res = await up();
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.e.message).toMatch(/パイロットのラボ/);
+    expectNothingTouched();
+  });
+
+  it('ID の接頭辞で別名のネットワークに解決された場合（名前が一致しない）も接続しない', async () => {
+    stub.networks['proj_app-zzz'] = { Id: 'proj_app-zzz', Name: 'unrelated', Labels: { 'cloud-dojo': 'compose', 'cloud-dojo.compose.project': 'proj', 'cloud-dojo.compose.network': 'app' } };
+    const res = await up();
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.e.message).toMatch(/名前が一致しない/);
+    expectNothingTouched();
+  });
+
+  it('この API が作った同じプロジェクトのネットワークは、作り直さずに接続する', async () => {
+    stub.networks['ours0104'] = { Id: 'ours0104', Name: 'proj_app', Labels: { 'cloud-dojo': 'compose', 'cloud-dojo.compose.project': 'proj', 'cloud-dojo.compose.network': 'app' } };
+    const res = await up();
+    expect(res.ok).toBe(true);
+    expect(stub.calls.createNetwork).toHaveLength(0);
+    expect(stub.calls.networkMode).toEqual([
+      { name: 'proj_web', mode: 'proj_app' },
+      { name: 'proj_db', mode: 'proj_app' },
+    ]);
+  });
+
+  it('Docker Compose が作った同じプロジェクトのネットワーク（com.docker.compose.*）にも従来どおり接続する', async () => {
+    stub.networks['dc0105'] = { Id: 'dc0105', Name: 'proj_app', Labels: { 'com.docker.compose.project': 'proj', 'com.docker.compose.network': 'app' } };
+    const res = await up();
+    expect(res.ok).toBe(true);
+    expect(stub.calls.createNetwork).toHaveLength(0);
+    expect(stub.calls.create).toEqual(['proj_web', 'proj_db']);
+  });
+
+  it('同名のネットワークが無ければ、compose のラベルを付けて作成し、そこへ接続する', async () => {
+    const res = await up();
+    expect(res.ok).toBe(true);
+    expect(stub.calls.createNetworkLabels).toEqual([
+      { name: 'proj_app', labels: { 'cloud-dojo': 'compose', 'cloud-dojo.compose.project': 'proj', 'cloud-dojo.compose.network': 'app' } },
+    ]);
+    expect(stub.calls.networkMode.map((m) => m.mode)).toEqual(['proj_app', 'proj_app']);
   });
 });
