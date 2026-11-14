@@ -223,14 +223,14 @@ export function CICDPipeline() {
     if (status === 'failed') {
       return <XCircle className="w-4 h-4 text-red-500" />;
     }
-    return <Clock className="w-4 h-4 text-gray-400" />;
+    return <Clock className="w-4 h-4 text-muted-foreground" />;
   };
 
   const getStatusColor = (status: string, conclusion?: string) => {
-    if (status === 'in_progress') return 'text-blue-600 bg-blue-50';
-    if (status === 'completed' && conclusion === 'success') return 'text-green-600 bg-green-50';
-    if (status === 'failed' || conclusion === 'failure') return 'text-red-600 bg-red-50';
-    return 'text-gray-600 bg-gray-50';
+    if (status === 'in_progress') return 'text-blue-700 bg-blue-50 dark:text-blue-300 dark:bg-blue-500/15';
+    if (status === 'completed' && conclusion === 'success') return 'text-green-700 bg-green-50 dark:text-green-300 dark:bg-green-500/15';
+    if (status === 'failed' || conclusion === 'failure') return 'text-red-700 bg-red-50 dark:text-red-300 dark:bg-red-500/15';
+    return 'text-muted-foreground bg-muted';
   };
 
   const formatDuration = (ms?: number) => {
@@ -290,7 +290,7 @@ export function CICDPipeline() {
                 <div className="p-3 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-lg shadow-lg">
                   <Settings className="w-6 h-6 text-white" />
                 </div>
-                <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+                <h2 className="text-xl font-bold bg-gradient-to-r from-blue-600 dark:from-blue-400 to-cyan-600 dark:to-cyan-400 bg-clip-text text-transparent">
                   CI/CDとは？
                 </h2>
               </div>
@@ -302,19 +302,19 @@ export function CICDPipeline() {
                 </p>
                 <div className="grid md:grid-cols-3 gap-4">
                   <div className="bg-blue-500/5 rounded-lg p-4 border border-blue-500/20 hover:border-blue-500/40 transition-colors">
-                    <h3 className="font-bold text-blue-400 mb-2">Continuous Integration</h3>
+                    <h3 className="font-bold text-blue-600 dark:text-blue-400 mb-2">Continuous Integration</h3>
                     <p className="text-sm text-muted-foreground">
                       コードの変更を自動的にビルド・テストし、問題を早期発見
                     </p>
                   </div>
                   <div className="bg-cyan-500/5 rounded-lg p-4 border border-cyan-500/20 hover:border-cyan-500/40 transition-colors">
-                    <h3 className="font-bold text-cyan-400 mb-2">Continuous Delivery</h3>
+                    <h3 className="font-bold text-cyan-700 dark:text-cyan-400 mb-2">Continuous Delivery</h3>
                     <p className="text-sm text-muted-foreground">
                       テスト済みのコードを自動的にデプロイ可能な状態に
                     </p>
                   </div>
                   <div className="bg-teal-500/5 rounded-lg p-4 border border-teal-500/20 hover:border-teal-500/40 transition-colors">
-                    <h3 className="font-bold text-teal-400 mb-2">Continuous Deployment</h3>
+                    <h3 className="font-bold text-teal-700 dark:text-teal-400 mb-2">Continuous Deployment</h3>
                     <p className="text-sm text-muted-foreground">
                       本番環境への自動デプロイまで実施
                     </p>
@@ -329,7 +329,7 @@ export function CICDPipeline() {
                 <div className="p-3 bg-gradient-to-br from-purple-500 to-pink-500 rounded-lg shadow-lg">
                   <Code className="w-6 h-6 text-white" />
                 </div>
-                <h2 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+                <h2 className="text-xl font-bold bg-gradient-to-r from-purple-600 dark:from-purple-400 to-pink-600 dark:to-pink-400 bg-clip-text text-transparent">
                   GitHub Actionsの基本
                 </h2>
               </div>
@@ -341,7 +341,7 @@ export function CICDPipeline() {
                     </h3>
                     <div className="space-y-3">
                       <div className="flex items-start gap-3 bg-purple-500/5 rounded-lg p-3 border border-purple-500/20 hover:border-purple-500/40 transition-colors">
-                        <CheckCircle className="w-5 h-5 text-purple-400 flex-shrink-0 mt-0.5" />
+                        <CheckCircle className="w-5 h-5 text-purple-600 dark:text-purple-400 flex-shrink-0 mt-0.5" />
                         <div>
                           <strong className="text-foreground">Workflow</strong>
                           <p className="text-sm text-muted-foreground">
@@ -350,7 +350,7 @@ export function CICDPipeline() {
                         </div>
                       </div>
                       <div className="flex items-start gap-3 bg-purple-500/5 rounded-lg p-3 border border-purple-500/20 hover:border-purple-500/40 transition-colors">
-                        <CheckCircle className="w-5 h-5 text-purple-400 flex-shrink-0 mt-0.5" />
+                        <CheckCircle className="w-5 h-5 text-purple-600 dark:text-purple-400 flex-shrink-0 mt-0.5" />
                         <div>
                           <strong className="text-foreground">Job</strong>
                           <p className="text-sm text-muted-foreground">
@@ -359,7 +359,7 @@ export function CICDPipeline() {
                         </div>
                       </div>
                       <div className="flex items-start gap-3 bg-purple-500/5 rounded-lg p-3 border border-purple-500/20 hover:border-purple-500/40 transition-colors">
-                        <CheckCircle className="w-5 h-5 text-purple-400 flex-shrink-0 mt-0.5" />
+                        <CheckCircle className="w-5 h-5 text-purple-600 dark:text-purple-400 flex-shrink-0 mt-0.5" />
                         <div>
                           <strong className="text-foreground">Step</strong>
                           <p className="text-sm text-muted-foreground">
@@ -368,7 +368,7 @@ export function CICDPipeline() {
                         </div>
                       </div>
                       <div className="flex items-start gap-3 bg-purple-500/5 rounded-lg p-3 border border-purple-500/20 hover:border-purple-500/40 transition-colors">
-                        <CheckCircle className="w-5 h-5 text-purple-400 flex-shrink-0 mt-0.5" />
+                        <CheckCircle className="w-5 h-5 text-purple-600 dark:text-purple-400 flex-shrink-0 mt-0.5" />
                         <div>
                           <strong className="text-foreground">Action</strong>
                           <p className="text-sm text-muted-foreground">
@@ -382,14 +382,14 @@ export function CICDPipeline() {
                     <h3 className="font-bold text-foreground mb-3 text-lg">トリガーイベント</h3>
                     <div className="space-y-3">
                       <div className="flex items-start gap-3 bg-pink-500/5 rounded-lg p-3 border border-pink-500/20 hover:border-pink-500/40 transition-colors">
-                        <Play className="w-5 h-5 text-pink-400 flex-shrink-0 mt-0.5" />
+                        <Play className="w-5 h-5 text-pink-600 dark:text-pink-400 flex-shrink-0 mt-0.5" />
                         <div>
                           <code className="text-sm font-semibold text-foreground">push</code>
                           <p className="text-sm text-muted-foreground">コードのプッシュ時に実行</p>
                         </div>
                       </div>
                       <div className="flex items-start gap-3 bg-pink-500/5 rounded-lg p-3 border border-pink-500/20 hover:border-pink-500/40 transition-colors">
-                        <Play className="w-5 h-5 text-pink-400 flex-shrink-0 mt-0.5" />
+                        <Play className="w-5 h-5 text-pink-600 dark:text-pink-400 flex-shrink-0 mt-0.5" />
                         <div>
                           <code className="text-sm font-semibold text-foreground">
                             pull_request
@@ -398,7 +398,7 @@ export function CICDPipeline() {
                         </div>
                       </div>
                       <div className="flex items-start gap-3 bg-pink-500/5 rounded-lg p-3 border border-pink-500/20 hover:border-pink-500/40 transition-colors">
-                        <Play className="w-5 h-5 text-pink-400 flex-shrink-0 mt-0.5" />
+                        <Play className="w-5 h-5 text-pink-600 dark:text-pink-400 flex-shrink-0 mt-0.5" />
                         <div>
                           <code className="text-sm font-semibold text-foreground">
                             workflow_dispatch
@@ -407,7 +407,7 @@ export function CICDPipeline() {
                         </div>
                       </div>
                       <div className="flex items-start gap-3 bg-pink-500/5 rounded-lg p-3 border border-pink-500/20 hover:border-pink-500/40 transition-colors">
-                        <Play className="w-5 h-5 text-pink-400 flex-shrink-0 mt-0.5" />
+                        <Play className="w-5 h-5 text-pink-600 dark:text-pink-400 flex-shrink-0 mt-0.5" />
                         <div>
                           <code className="text-sm font-semibold text-foreground">schedule</code>
                           <p className="text-sm text-muted-foreground">定期実行（cron形式）</p>
@@ -425,7 +425,7 @@ export function CICDPipeline() {
                 <div className="p-3 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg shadow-lg">
                   <FileCode className="w-6 h-6 text-white" />
                 </div>
-                <h2 className="text-2xl font-bold bg-gradient-to-r from-orange-400 to-amber-400 bg-clip-text text-transparent">
+                <h2 className="text-xl font-bold bg-gradient-to-r from-orange-600 dark:from-orange-400 to-amber-600 dark:to-amber-400 bg-clip-text text-transparent">
                   ワークフローYAMLの書き方
                 </h2>
               </div>
@@ -438,8 +438,8 @@ export function CICDPipeline() {
                     </span>
                     基本的なワークフロー
                   </h3>
-                  <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                    <pre className="text-sm text-gray-100">
+                  <div className="terminal rounded-lg p-4 overflow-x-auto">
+                    <pre className="text-sm">
                       <code>{`name: CI Workflow
 on:
   push:
@@ -471,8 +471,8 @@ jobs:
                     </span>
                     複数ジョブの並列実行
                   </h3>
-                  <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                    <pre className="text-sm text-gray-100">
+                  <div className="terminal rounded-lg p-4 overflow-x-auto">
+                    <pre className="text-sm">
                       <code>{`jobs:
   test:
     runs-on: ubuntu-latest
@@ -502,8 +502,8 @@ jobs:
                     </span>
                     環境変数とシークレット
                   </h3>
-                  <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                    <pre className="text-sm text-gray-100">
+                  <div className="terminal rounded-lg p-4 overflow-x-auto">
+                    <pre className="text-sm">
                       <code>{`jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -529,8 +529,8 @@ jobs:
                     </span>
                     マトリックスビルド
                   </h3>
-                  <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                    <pre className="text-sm text-gray-100">
+                  <div className="terminal rounded-lg p-4 overflow-x-auto">
+                    <pre className="text-sm">
                       <code>{`jobs:
   test:
     runs-on: \${{ matrix.os }}
@@ -555,8 +555,8 @@ jobs:
                     </span>
                     条件付き実行
                   </h3>
-                  <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                    <pre className="text-sm text-gray-100">
+                  <div className="terminal rounded-lg p-4 overflow-x-auto">
+                    <pre className="text-sm">
                       <code>{`jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
@@ -581,14 +581,14 @@ jobs:
                 <div className="p-3 bg-gradient-to-br from-green-500 to-emerald-500 rounded-lg shadow-lg">
                   <Lightbulb className="w-6 h-6 text-white" />
                 </div>
-                <h2 className="text-2xl font-bold bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent">
+                <h2 className="text-xl font-bold bg-gradient-to-r from-green-600 dark:from-green-400 to-emerald-600 dark:to-emerald-400 bg-clip-text text-transparent">
                   ベストプラクティス
                 </h2>
               </div>
               <div className="grid md:grid-cols-2 gap-4">
                 <div className="bg-green-500/5 rounded-lg border-l-4 border-green-500 p-5 shadow-sm hover:shadow-md hover:bg-green-500/10 transition-all">
                   <h3 className="font-bold text-foreground mb-2 flex items-center gap-2">
-                    <Zap className="w-5 h-5 text-green-400" />
+                    <Zap className="w-5 h-5 text-green-700 dark:text-green-400" />
                     高速なフィードバックループ
                   </h3>
                   <p className="text-muted-foreground text-sm leading-relaxed">
@@ -597,7 +597,7 @@ jobs:
                 </div>
                 <div className="bg-blue-500/5 rounded-lg border-l-4 border-blue-500 p-5 shadow-sm hover:shadow-md hover:bg-blue-500/10 transition-all">
                   <h3 className="font-bold text-foreground mb-2 flex items-center gap-2">
-                    <Activity className="w-5 h-5 text-blue-400" />
+                    <Activity className="w-5 h-5 text-blue-600 dark:text-blue-400" />
                     並列実行の活用
                   </h3>
                   <p className="text-muted-foreground text-sm leading-relaxed">
@@ -606,7 +606,7 @@ jobs:
                 </div>
                 <div className="bg-purple-500/5 rounded-lg border-l-4 border-purple-500 p-5 shadow-sm hover:shadow-md hover:bg-purple-500/10 transition-all">
                   <h3 className="font-bold text-foreground mb-2 flex items-center gap-2">
-                    <Package className="w-5 h-5 text-purple-400" />
+                    <Package className="w-5 h-5 text-purple-600 dark:text-purple-400" />
                     キャッシュの活用
                   </h3>
                   <p className="text-muted-foreground text-sm leading-relaxed">
@@ -616,7 +616,7 @@ jobs:
                 </div>
                 <div className="bg-orange-500/5 rounded-lg border-l-4 border-orange-500 p-5 shadow-sm hover:shadow-md hover:bg-orange-500/10 transition-all">
                   <h3 className="font-bold text-foreground mb-2 flex items-center gap-2">
-                    <Lock className="w-5 h-5 text-orange-400" />
+                    <Lock className="w-5 h-5 text-orange-700 dark:text-orange-400" />
                     シークレット管理
                   </h3>
                   <p className="text-muted-foreground text-sm leading-relaxed">
@@ -626,7 +626,7 @@ jobs:
                 </div>
                 <div className="bg-cyan-500/5 rounded-lg border-l-4 border-cyan-500 p-5 shadow-sm hover:shadow-md hover:bg-cyan-500/10 transition-all">
                   <h3 className="font-bold text-foreground mb-2 flex items-center gap-2">
-                    <Target className="w-5 h-5 text-cyan-400" />
+                    <Target className="w-5 h-5 text-cyan-700 dark:text-cyan-400" />
                     ジョブの粒度
                   </h3>
                   <p className="text-muted-foreground text-sm leading-relaxed">
@@ -635,7 +635,7 @@ jobs:
                 </div>
                 <div className="bg-pink-500/5 rounded-lg border-l-4 border-pink-500 p-5 shadow-sm hover:shadow-md hover:bg-pink-500/10 transition-all">
                   <h3 className="font-bold text-foreground mb-2 flex items-center gap-2">
-                    <RefreshCw className="w-5 h-5 text-pink-400" />
+                    <RefreshCw className="w-5 h-5 text-pink-600 dark:text-pink-400" />
                     再利用可能なワークフロー
                   </h3>
                   <p className="text-muted-foreground text-sm leading-relaxed">
@@ -676,7 +676,7 @@ jobs:
                     </button>
                   </div>
                   {executionMode === 'real' && (
-                    <div className="flex items-center gap-2 text-sm text-amber-400 bg-amber-500/10 px-3 py-1 rounded-lg border border-amber-500/30">
+                    <div className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-400 bg-amber-500/10 px-3 py-1 rounded-lg border border-amber-500/30">
                       <span className="animate-pulse">⚡</span>
                       <span>実際のコマンドを実行します</span>
                     </div>
@@ -698,14 +698,14 @@ jobs:
                   <button
                     onClick={validateWorkflow}
                     disabled={isValidating || !yaml.trim()}
-                    className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 text-sm"
+                    className="btn btn-primary"
                   >
                     {isValidating ? '検証中...' : '検証'}
                   </button>
                   <button
                     onClick={runWorkflow}
                     disabled={isRunning || !yaml.trim()}
-                    className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 text-sm flex items-center"
+                    className="btn btn-success"
                   >
                     <Play className="w-4 h-4 mr-1" />
                     {isRunning ? '実行中...' : '実行'}
@@ -715,7 +715,7 @@ jobs:
 
               {validationResult && (
                 <div
-                  className={`p-3 rounded text-sm border ${validationResult.valid ? 'bg-green-500/10 text-green-400 border-green-500/30' : 'bg-red-500/10 text-red-400 border-red-500/30'}`}
+                  className={`p-3 rounded text-sm border ${validationResult.valid ? 'bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/30' : 'bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/30'}`}
                 >
                   {validationResult.valid ? (
                     <div>
@@ -741,7 +741,7 @@ jobs:
               <textarea
                 value={yaml}
                 onChange={(e) => setYaml(e.target.value)}
-                className="w-full h-full font-mono text-sm bg-gray-900 text-gray-100 border border-gray-700 rounded p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder:text-gray-500"
+                className="w-full h-full min-h-[28rem] font-mono text-sm terminal rounded-lg p-4 resize-y focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-slate-500"
                 placeholder="ワークフローYAMLを入力..."
                 spellCheck={false}
               />
@@ -800,7 +800,7 @@ jobs:
                                 style={{ animationDelay: '300ms' }}
                               ></div>
                             </div>
-                            <span className="text-sm text-blue-400 font-medium">実行中...</span>
+                            <span className="text-sm text-blue-600 dark:text-blue-400 font-medium">実行中...</span>
                           </div>
                         )}
                       </div>
@@ -834,7 +834,7 @@ jobs:
                   >
                     <button
                       onClick={() => setExpandedJob(expandedJob === job.id ? null : job.id)}
-                      className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                      className="w-full px-6 py-4 flex items-center justify-between hover:bg-muted transition-colors"
                     >
                       <div className="flex items-center space-x-3">
                         <div className="relative">
@@ -847,7 +847,7 @@ jobs:
                           <div className="font-semibold flex items-center gap-2">
                             {job.name}
                             {job.status === 'in_progress' && (
-                              <span className="text-xs text-blue-400">処理中...</span>
+                              <span className="text-xs text-blue-600 dark:text-blue-400">処理中...</span>
                             )}
                           </div>
                           <div className="text-sm text-muted-foreground">Runner: {job.runner}</div>
@@ -875,7 +875,7 @@ jobs:
                               onClick={() =>
                                 setExpandedStep(expandedStep === step.id ? null : step.id)
                               }
-                              className="w-full px-8 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                              className="w-full px-8 py-3 flex items-center justify-between hover:bg-muted transition-colors"
                             >
                               <div className="flex items-center space-x-3">
                                 <div className="relative">
@@ -909,7 +909,7 @@ jobs:
                             </button>
 
                             {expandedStep === step.id && step.output.length > 0 && (
-                              <div className="bg-gray-900 text-gray-100 px-8 py-4 font-mono text-xs overflow-x-auto relative border-t border-gray-700">
+                              <div className="terminal border-x-0 border-b-0 px-8 py-4 font-mono text-xs overflow-x-auto relative">
                                 {step.status === 'in_progress' && (
                                   <div className="absolute top-2 right-2 flex items-center gap-2 bg-blue-500/20 px-2 py-1 rounded border border-blue-500/30">
                                     <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
@@ -960,11 +960,11 @@ jobs:
               </div>
             ) : (
               <div className="max-w-2xl mx-auto text-center py-12">
-                <Settings className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                <Settings className="w-16 h-16 text-muted-foreground mx-auto mb-4" />
+                <h3 className="text-lg font-semibold text-foreground mb-2">
                   実行中のワークフローはありません
                 </h3>
-                <p className="text-gray-600">
+                <p className="text-muted-foreground">
                   「ワークフロー作成」タブでワークフローを実行してください
                 </p>
               </div>
@@ -977,9 +977,9 @@ jobs:
             <div className="max-w-6xl mx-auto">
               {runs.length === 0 ? (
                 <div className="text-center py-12">
-                  <History className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-                  <h3 className="text-lg font-semibold text-gray-900 mb-2">実行履歴がありません</h3>
-                  <p className="text-gray-600">
+                  <History className="w-16 h-16 text-muted-foreground mx-auto mb-4" />
+                  <h3 className="text-lg font-semibold text-foreground mb-2">実行履歴がありません</h3>
+                  <p className="text-muted-foreground">
                     ワークフローを実行すると、ここに履歴が表示されます
                   </p>
                 </div>
@@ -995,7 +995,7 @@ jobs:
                           {getStatusIcon(run.status, run.conclusion)}
                           <div>
                             <div className="font-semibold">{run.workflowName}</div>
-                            <div className="text-sm text-gray-600">
+                            <div className="text-sm text-muted-foreground">
                               {new Date(run.startTime).toLocaleString('ja-JP')} • {run.trigger} •{' '}
                               {run.branch}
                             </div>
@@ -1003,7 +1003,7 @@ jobs:
                         </div>
                         <div className="flex items-center space-x-4">
                           {run.duration && (
-                            <span className="text-sm text-gray-600">
+                            <span className="text-sm text-muted-foreground">
                               {formatDuration(run.duration)}
                             </span>
                           )}

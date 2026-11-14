@@ -14,6 +14,7 @@ import { attemptCompletion, evaluateAttempt, unitCompletion, type Reflection } f
 import { LabLock, sharedLabLock } from './lab/lock';
 import { LabCleanupPendingError, LabTimeoutError, LabUnavailableError, type LabCleanupState, type LabRunner } from './lab/runner';
 import type { AttemptRow, PilotStore } from './store';
+import { loopbackOnlyHook } from './loopback';
 
 export interface PilotDeps {
   store: PilotStore;
@@ -22,31 +23,8 @@ export interface PilotDeps {
   labLock?: LabLock;
 }
 
-const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
-const isLoopback = (ip: string) => LOOPBACK.has(ip) || /^127\.\d+\.\d+\.\d+$/.test(ip) || /^::ffff:127\.\d+\.\d+\.\d+$/.test(ip);
-
-/** 転送ヘッダの1要素（"[::1]:1234"・"1.2.3.4:5678"・'"::1"' など）からアドレスだけを取り出す */
-function stripAddr(raw: string): string {
-  let v = raw.trim().replace(/^"|"$/g, '');
-  if (v.startsWith('[')) return v.slice(1, v.indexOf(']') > 0 ? v.indexOf(']') : undefined);
-  if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(v)) v = v.slice(0, v.lastIndexOf(':'));
-  return v;
-}
-
-/**
- * プロキシが付けた転送ヘッダ（X-Forwarded-For・X-Real-IP・Forwarded）に記録された元の接続元。
- * Vite の開発サーバ等のプロキシ経由で届いた要求は TCP 上は loopback に見えるため、元の接続元も検査する。
- */
-export function forwardedClients(headers: Record<string, string | string[] | undefined>): string[] {
-  const all = (h: string | string[] | undefined) => (h === undefined ? [] : Array.isArray(h) ? h : [h]);
-  const out: string[] = [];
-  for (const v of all(headers['x-forwarded-for'])) out.push(...v.split(',').map(stripAddr).filter(Boolean));
-  for (const v of all(headers['x-real-ip'])) out.push(stripAddr(v));
-  for (const v of all(headers.forwarded)) {
-    for (const m of v.matchAll(/for=("[^"]*"|[^;,\s]+)/gi)) out.push(stripAddr(m[1]));
-  }
-  return out;
-}
+// 接続元の loopback 判定は loopback.ts に集約（パイロット API では server.ts のルートスコープでも同じ検査を全経路にかける）
+export { forwardedClients } from './loopback';
 
 function dockerMissing(reply: FastifyReply, e: LabUnavailableError) {
   return reply.status(503).send({ error: e.code, message: e.message, hint: 'Docker Desktop（または Docker Engine）を起動してから再試行してください。Docker が無い環境ではフィクスチャ実行（練習用・完了不可）を使えます。' });
@@ -92,15 +70,9 @@ export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
   const { store, lab } = opts;
   const labLock = opts.labLock ?? sharedLabLock;
 
-  // ラボ・試行 API はローカル利用者専用（127.0.0.1 のみ）。
-  // 接続元が loopback でも、プロキシの転送ヘッダに loopback 以外の元の接続元があれば拒否する
-  // （別端末 → Vite 開発サーバのプロキシ → API という迂回を塞ぐ。trustProxy は使わないので req.ip は TCP の接続元）
-  fastify.addHook('onRequest', async (req, reply) => {
-    const forwarded = forwardedClients(req.headers);
-    if (!isLoopback(req.ip) || forwarded.some((ip) => !isLoopback(ip))) {
-      return reply.status(403).send({ error: 'LOOPBACK_ONLY', message: 'この API は 127.0.0.1 からのみ利用できます（プロキシ経由で別端末から届いた要求も拒否します）' });
-    }
-  });
+  // ラボ・試行 API はローカル利用者専用（127.0.0.1 のみ）。既存サーバ（routes/index.ts）に登録された場合もこのスコープで効くよう、
+  // プラグイン内にも同じ検査を置く（パイロット API ではルートスコープの検査と二重になるが、判定は同じ）
+  fastify.addHook('onRequest', loopbackOnlyHook);
 
   function view(attempt: AttemptRow) {
     const unit = getUnit(attempt.unitId)!;

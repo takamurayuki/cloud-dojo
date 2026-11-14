@@ -129,7 +129,7 @@ export function LearningPath() {
         className="space-y-4"
       >
         <div className="flex items-center gap-2 mb-4">
-          <h2 className="text-2xl font-bold">Your Courses</h2>
+          <h2 className="text-xl font-bold">Your Courses</h2>
         </div>
 
         <div className="space-y-4">
@@ -159,7 +159,7 @@ export function LearningPath() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-start justify-between mb-2">
                     <div>
-                      <h3 className="text-xl font-bold mb-1">{course.title}</h3>
+                      <h3 className="text-lg font-bold mb-1">{course.title}</h3>
                       <p className="text-sm text-muted-foreground mb-3">{course.description}</p>
                     </div>
                     {course.unlocked && course.progress > 0 && (
@@ -176,13 +176,14 @@ export function LearningPath() {
                       {course.lessons} lessons
                     </span>
                     <span>{course.duration}</span>
+                    {/* レベル表示：淡い背景（-500/10）の上で両テーマとも 4.5:1 以上（ライト -800：6.5〜7.8、ダーク -300：9.1〜11.2） */}
                     <span
                       className={`px-2 py-1 rounded-md text-xs font-medium ${
                         course.level === 'Beginner'
-                          ? 'bg-green-500/10 text-green-600'
+                          ? 'bg-green-500/10 text-green-800 dark:text-green-300'
                           : course.level === 'Intermediate'
-                            ? 'bg-blue-500/10 text-blue-600'
-                            : 'bg-purple-500/10 text-purple-600'
+                            ? 'bg-blue-500/10 text-blue-800 dark:text-blue-300'
+                            : 'bg-purple-500/10 text-purple-800 dark:text-purple-300'
                       }`}
                     >
                       {course.level}
@@ -224,7 +225,7 @@ export function LearningPath() {
       >
         <div className="flex items-center gap-2 mb-6">
           <Trophy className="w-6 h-6 text-primary" />
-          <h2 className="text-2xl font-bold">Achievements</h2>
+          <h2 className="text-xl font-bold">Achievements</h2>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

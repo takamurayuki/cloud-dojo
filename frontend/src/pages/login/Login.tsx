@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Lock, Mail, LogIn, UserPlus } from 'lucide-react';
+import { Lock, Mail, LogIn, UserPlus, Sun, Moon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useTheme } from '@/contexts/ThemeContext';
+import logoUrl from '@/assets/cloud-dojo-logo.png';
 
 export function Login() {
   const [isLogin, setIsLogin] = useState(true);
@@ -10,6 +12,7 @@ export function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { login, register } = useAuth();
+  const { theme, toggleTheme } = useTheme();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,12 +33,24 @@ export function Login() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900">
+    <div className="relative min-h-screen flex items-center justify-center bg-background">
+      <div className="absolute inset-0 gradient-mesh pointer-events-none" />
+      {/* ログイン画面は共通ナビが無いため、ここにもテーマ切替を置く */}
+      <button
+        type="button"
+        onClick={toggleTheme}
+        data-testid="theme-toggle"
+        aria-label={`表示テーマ：${theme === 'dark' ? 'ダーク' : 'ライト'}（${theme === 'dark' ? 'ライト' : 'ダーク'}表示に切り替え）`}
+        className="absolute top-4 right-4 z-10 btn btn-outline btn-sm"
+      >
+        {theme === 'dark' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4 text-amber-600" />}
+        {theme === 'dark' ? 'ダーク' : 'ライト'}
+      </button>
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5 }}
-        className="w-full max-w-md p-8"
+        className="relative w-full max-w-md p-8"
       >
         {/* Logo & Title */}
         <div className="text-center mb-8">
@@ -43,11 +58,11 @@ export function Login() {
             initial={{ scale: 0 }}
             animate={{ scale: 1 }}
             transition={{ delay: 0.2, type: 'spring' }}
-            className="inline-block p-4 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl mb-4"
+            className="inline-flex p-3 bg-card border border-border rounded-2xl mb-4 shadow-sm"
           >
-            <div className="text-4xl">🥋</div>
+            <img src={logoUrl} alt="" width={56} height={56} className="w-14 h-14 object-contain" />
           </motion.div>
-          <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          <h1 className="page-title">
             Cloud Dojo
           </h1>
           <p className="text-muted-foreground mt-2">Master DevOps & Infrastructure</p>
@@ -58,7 +73,7 @@ export function Login() {
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.3 }}
-          className="bg-card border rounded-2xl shadow-xl p-8"
+          className="bg-card border border-border rounded-2xl shadow-xl p-8"
         >
           {/* Tabs */}
           <div className="flex gap-2 mb-6 p-1 bg-muted rounded-lg">
@@ -99,7 +114,8 @@ export function Login() {
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
                   required
-                  className="w-full pl-10 pr-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-background"
+                  aria-invalid={error ? true : undefined}
+                  className="field pl-10 pr-4 py-3"
                 />
               </div>
             </div>
@@ -116,7 +132,8 @@ export function Login() {
                   placeholder="••••••••"
                   required
                   minLength={8}
-                  className="w-full pl-10 pr-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-background"
+                  aria-invalid={error ? true : undefined}
+                  className="field pl-10 pr-4 py-3"
                 />
               </div>
               {!isLogin && (
@@ -129,9 +146,10 @@ export function Login() {
               <motion.div
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg"
+                role="alert"
+                className="p-3 bg-danger/10 border border-danger/40 rounded-lg"
               >
-                <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+                <p className="text-sm text-danger">{error}</p>
               </motion.div>
             )}
 
@@ -141,7 +159,7 @@ export function Login() {
               disabled={loading}
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              className="w-full py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-medium rounded-lg shadow-lg hover:shadow-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-medium rounded-lg shadow-lg hover:shadow-xl transition-all disabled:opacity-60 disabled:cursor-wait focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
             >
               {loading ? (
                 <span className="flex items-center justify-center">
@@ -172,11 +190,11 @@ export function Login() {
           </form>
 
           {/* Demo Account Info */}
-          <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-            <p className="text-sm text-blue-800 dark:text-blue-300 font-medium mb-1">
+          <div className="mt-6 p-4 bg-primary/5 rounded-lg border border-primary/30">
+            <p className="text-sm text-foreground font-medium mb-1">
               💡 Demo Account
             </p>
-            <p className="text-xs text-blue-600 dark:text-blue-400">
+            <p className="text-xs text-muted-foreground font-mono">
               Email: demo@clouddojo.dev
               <br />
               Password: demo1234

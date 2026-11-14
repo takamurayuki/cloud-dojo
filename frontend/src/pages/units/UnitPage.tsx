@@ -2,8 +2,11 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   AlertTriangle,
+  ArrowRight,
+  Check,
   CheckCircle2,
   FlaskConical,
+  Loader2,
   Lock,
   Play,
   RefreshCw,
@@ -23,6 +26,8 @@ import {
   type Unit,
   type UnitStatus,
 } from '@/features/pilot/api';
+import { PageLayout } from '@/layouts/PageLayout';
+import { PageHeader } from '@/layouts/PageHeader';
 
 const STORAGE_KEY = (unitId: string) => `pilot-attempt-${unitId}`;
 
@@ -75,14 +80,14 @@ function Card({ title, children, right }: { title: string; children: React.React
 /** 後始末中が続く場合の復旧手順（開いて読む。README「後始末中が続く場合」と同じ内容） */
 function RecoverySteps() {
   return (
-    <details className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-amber-100" data-testid="lab-recovery-steps">
-      <summary className="cursor-pointer font-semibold select-none">復旧手順</summary>
+    <details className="mt-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-foreground" data-testid="lab-recovery-steps">
+      <summary className="cursor-pointer font-semibold select-none text-warning">復旧手順</summary>
       <ol className="mt-2 list-decimal space-y-1 pl-5">
         {LAB_CLEANUP_RECOVERY_STEPS.map((step) => (
           <li key={step}>{step}</li>
         ))}
       </ol>
-      <div className="mt-2 text-xs opacity-80">
+      <div className="mt-2 text-xs text-muted-foreground">
         同じ内容をリポジトリの backend/api/src/pilot/README.md「後始末中が続く場合」にも記載しています。
       </div>
     </details>
@@ -92,17 +97,34 @@ function RecoverySteps() {
 function ErrorBox({ error }: { error: ApiError | null }) {
   if (!error) return null;
   return (
-    <div className="rounded-xl border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-200 flex gap-2" role="alert">
-      <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+    <div className="rounded-xl border border-danger/50 bg-danger/10 p-3 text-sm text-foreground flex gap-2" role="alert">
+      <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-danger" />
       <div>
-        <div className="font-semibold">{ERROR_TITLES[error.code] ?? `エラー（${error.code}）`}</div>
+        <div className="font-semibold text-danger">{ERROR_TITLES[error.code] ?? `エラー（${error.code}）`}</div>
         <div>{error.message}</div>
-        {error.hint && <div className="mt-1 opacity-80">{error.hint}</div>}
+        {error.hint && <div className="mt-1 text-muted-foreground">{error.hint}</div>}
         {error.recovery && <RecoverySteps />}
       </div>
     </div>
   );
 }
+
+/** 次に押すボタンの種類（表示用。学習フローの判定は API の状態をそのまま使う） */
+type NextAction = 'start' | 'choose' | 'submit' | 'run' | 'reflect' | 'review' | 'retry' | 'done';
+
+const NEXT_ACTION_TEXT: Record<NextAction, { title: string; detail: string }> = {
+  start: { title: '「試行を始める」を押す', detail: '左の「予測」カードから。シードから条件が決まります。' },
+  choose: { title: '予測の各項目を選ぶ', detail: '左の「予測」カードで、すべての項目を選ぶと提出できます。' },
+  submit: { title: '「予測を提出してロック」を押す', detail: '提出すると予測は変更できません。提出後にラボで実行できます。' },
+  run: { title: '「ラボで実行（実測）」を押す', detail: '右の「ラボ」カードから。フィクスチャ実行は練習用で、完了にはなりません。' },
+  reflect: { title: '観察を読み、説明と反事実を書いて「自己照合を記録」を押す', detail: '右の「観察」「判定と振り返り」で結果を確かめてから、左の「説明と反事実」へ。' },
+  review: { title: '未達の項目を直して記録し直すか、「新しい条件で試す」', detail: '「判定と振り返り」に、この試行が完了にならない理由が出ています。' },
+  retry: { title: '「新しい条件で試す」で別の条件に進む', detail: '単元の完了には、異なる条件での完了が必要です。' },
+  done: { title: '単元完了', detail: '必要な条件をすべて完了しました。別の条件で練習を続けることもできます。' },
+};
+
+/** 次に押すボタンを目立たせる枠 */
+const NEXT_RING = 'ring-2 ring-primary ring-offset-2 ring-offset-background';
 
 const LAYER_TABS = [
   { key: 'surface', label: '表層の操作' },
@@ -195,7 +217,7 @@ export function UnitPage() {
 
   if (!unit) {
     return (
-      <div className="p-8 space-y-4">
+      <div className="p-8 space-y-4 max-w-7xl mx-auto">
         <ErrorBox error={error} />
         {!error && <div className="text-muted-foreground">読み込み中…</div>}
       </div>
@@ -212,41 +234,104 @@ export function UnitPage() {
   const evidenceByKind = Object.fromEntries(evidence.map((e) => [e.kind, e]));
   const optionLabel = (fieldId: string, v: string | null) =>
     v === null ? '（証拠から算出できず）' : unit.prediction.fields.find((f) => f.id === fieldId)?.options.find((o) => o.value === v)?.label ?? v;
+  const remainingFields = unit.prediction.fields.filter((f) => !answers[f.id]).length;
+  // 表示だけのための「次にやること」。各ボタンの有効・無効の条件は従来どおり
+  const nextAction: NextAction =
+    status?.completed && attempt?.completion.completed
+      ? 'done'
+      : !attempt
+        ? 'start'
+        : !locked
+          ? fieldsComplete
+            ? 'submit'
+            : 'choose'
+          : evidence.length === 0
+            ? 'run'
+            : !attempt.reflection
+              ? 'reflect'
+              : attempt.completion.completed
+                ? 'retry'
+                : 'review';
+  const next = NEXT_ACTION_TEXT[nextAction];
+  const ringIf = (a: NextAction | NextAction[]) => ((Array.isArray(a) ? a : [a]).includes(nextAction) && !busy ? NEXT_RING : '');
 
   return (
-    <div className="p-6 space-y-4">
+    <PageLayout>
       {/* 見出し */}
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="text-sm text-muted-foreground">
-            {unit.domain} / {unit.code}
-          </div>
-          <h1 className="text-2xl font-bold">{unit.title}</h1>
-          <p className="text-muted-foreground max-w-3xl">{unit.summary}</p>
-        </div>
-        {status && (
-          <div className="glass rounded-xl px-4 py-2 text-sm" data-testid="unit-status">
-            <div className="font-semibold">{status.completed ? '単元完了' : '単元未完了'}</div>
-            <div className="text-muted-foreground">
-              完了した条件：{status.passedConditions.length > 0 ? status.passedConditions.join('、') : 'なし'}（異なる条件で {status.requiredDistinctConditions} つ必要）
+      <PageHeader
+        eyebrow={`${unit.domain} / ${unit.code}`}
+        title={unit.title}
+        description={unit.summary}
+        Icon={FlaskConical}
+        bgColor="bg-gradient-to-br from-emerald-500 to-teal-500"
+        aside={
+          status && (
+            <div
+              className={`rounded-xl border px-4 py-2 text-sm ${status.completed ? 'border-success/50 bg-success/10' : 'border-border bg-card'}`}
+              data-testid="unit-status"
+            >
+              <div className={`font-semibold ${status.completed ? 'text-success' : ''}`}>{status.completed ? '単元完了' : '単元未完了'}</div>
+              <div className="text-muted-foreground">
+                完了した条件：{status.passedConditions.length > 0 ? status.passedConditions.join('、') : 'なし'}（異なる条件で {status.requiredDistinctConditions} つ必要）
+              </div>
+              <div className="text-muted-foreground">試行数：{status.attempts}</div>
             </div>
-            <div className="text-muted-foreground">試行数：{status.attempts}</div>
-          </div>
-        )}
-      </header>
+          )
+        }
+      />
 
-      {/* 学習ループの進行（試行の状態から表示） */}
-      <ol className="flex flex-wrap gap-2 text-sm">
-        {unit.loop.map((s, i) => (
-          <li
-            key={s.stage}
-            className={`px-3 py-1 rounded-full border ${i === stageIndex ? 'bg-blue-600 text-white border-blue-600' : i < stageIndex ? 'border-blue-400 text-blue-300' : 'border-border text-muted-foreground'}`}
-            title={s.instructions}
-          >
-            {i + 1}. {s.title}
-          </li>
-        ))}
-      </ol>
+      {/* 学習ループの進行（試行の状態から表示）と次にやること。スクロールしても上部に残す */}
+      <div className="sticky top-0 z-20 -mx-2 px-2 py-3 bg-background/90 backdrop-blur border-b border-border space-y-3" data-testid="unit-progress">
+        <ol className="flex flex-wrap items-center gap-x-1 gap-y-2 text-sm" aria-label="学習の段階">
+          {unit.loop.map((s, i) => {
+            const state = i === stageIndex ? 'current' : i < stageIndex ? 'done' : 'todo';
+            return (
+              <li key={s.stage} className="flex items-center gap-1" title={s.instructions} aria-current={state === 'current' ? 'step' : undefined}>
+                {i > 0 && <span aria-hidden className={`h-px w-4 sm:w-6 ${i <= stageIndex ? 'bg-primary' : 'bg-border'}`} />}
+                <span
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-full border ${
+                    state === 'current'
+                      ? 'bg-primary text-primary-foreground border-primary font-semibold shadow-sm'
+                      : state === 'done'
+                        ? 'border-primary/50 bg-primary/10 text-primary'
+                        : 'border-border text-muted-foreground'
+                  }`}
+                >
+                  {state === 'done' ? <Check className="w-3.5 h-3.5" /> : <span className="tabular-nums">{i + 1}.</span>}
+                  {s.title}
+                  {state === 'current' && <span className="sr-only">（現在の段階）</span>}
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+        <div
+          className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-sm ${nextAction === 'done' ? 'border-success/50 bg-success/10' : 'border-primary/40 bg-primary/5'}`}
+          data-testid="next-action"
+          aria-live="polite"
+        >
+          {busy ? (
+            <Loader2 className="w-4 h-4 mt-0.5 shrink-0 animate-spin text-primary" />
+          ) : nextAction === 'done' ? (
+            <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0 text-success" />
+          ) : (
+            <ArrowRight className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
+          )}
+          <div>
+            <div className="font-semibold">
+              {busy ? (
+                '処理中…'
+              ) : (
+                <>
+                  次にやること：{next.title}
+                  {nextAction === 'choose' && `（残り ${remainingFields} 項目）`}
+                </>
+              )}
+            </div>
+            {!busy && <div className="text-muted-foreground">{next.detail}</div>}
+          </div>
+        </div>
+      </div>
 
       {!isLabError && <ErrorBox error={error} />}
 
@@ -259,7 +344,8 @@ export function UnitPage() {
                 <button
                   key={t.key}
                   onClick={() => setLayer(t.key)}
-                  className={`px-3 py-1.5 text-sm -mb-px border-b-2 ${layer === t.key ? 'border-blue-600 font-semibold' : 'border-transparent text-muted-foreground'}`}
+                  aria-pressed={layer === t.key}
+                  className={`px-3 py-1.5 text-sm -mb-px border-b-2 transition-colors ${layer === t.key ? 'border-primary text-primary font-semibold' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
                 >
                   {t.label}
                 </button>
@@ -272,7 +358,7 @@ export function UnitPage() {
               </p>
             ))}
             {unit.layers[layer].commands && (
-              <pre className="text-xs bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto">{unit.layers[layer].commands!.join('\n')}</pre>
+              <pre className="terminal text-xs rounded-lg p-3 overflow-x-auto">{unit.layers[layer].commands!.join('\n')}</pre>
             )}
             {layer === 'observation' && (
               <ul className="space-y-2">
@@ -290,7 +376,7 @@ export function UnitPage() {
             title="予測"
             right={
               attempt && (
-                <button onClick={newAttempt} disabled={busy} className="text-sm flex items-center gap-1 px-3 py-1 rounded-lg border border-border hover:bg-muted disabled:opacity-50">
+                <button onClick={newAttempt} disabled={busy} className={`btn btn-outline btn-sm ${ringIf(['retry', 'review', 'done'])}`}>
                   <RefreshCw className="w-4 h-4" /> 新しい条件で試す
                 </button>
               )
@@ -299,7 +385,7 @@ export function UnitPage() {
             {!attempt ? (
               <div className="space-y-2">
                 <p className="text-sm text-muted-foreground">試行を始めると、シードから条件が決まります。条件ごとに正解は変わります。</p>
-                <button onClick={newAttempt} disabled={busy} className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+                <button onClick={newAttempt} disabled={busy} className={`btn btn-primary ${ringIf('start')}`}>
                   試行を始める
                 </button>
               </div>
@@ -316,7 +402,7 @@ export function UnitPage() {
                   ))}
                 </div>
                 {locked && (
-                  <div className="flex items-center gap-2 text-sm text-amber-300" data-testid="prediction-locked">
+                  <div className="flex items-center gap-2 text-sm text-warning" data-testid="prediction-locked">
                     <Lock className="w-4 h-4" /> 予測は提出済みでロックされています（{attempt.predictionLockedAt && new Date(attempt.predictionLockedAt).toLocaleString()}）
                   </div>
                 )}
@@ -328,7 +414,9 @@ export function UnitPage() {
                         {f.options.map((o) => (
                           <label
                             key={o.value}
-                            className={`text-sm px-3 py-1 rounded-lg border cursor-pointer ${answers[f.id] === o.value ? 'border-blue-500 bg-blue-500/20' : 'border-border'} ${locked ? 'cursor-not-allowed opacity-80' : ''}`}
+                            className={`text-sm px-3 py-1 rounded-lg border transition-colors focus-within:ring-2 focus-within:ring-ring ${
+                              answers[f.id] === o.value ? 'border-primary bg-primary/15 text-foreground font-medium ring-1 ring-primary' : 'border-input bg-card'
+                            } ${locked ? 'cursor-not-allowed opacity-70' : 'cursor-pointer hover:bg-muted'}`}
                           >
                             <input
                               type="radio"
@@ -346,7 +434,7 @@ export function UnitPage() {
                   ))}
                 </div>
                 {!locked && (
-                  <button onClick={submitPrediction} disabled={busy || !fieldsComplete} className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50 flex items-center gap-2">
+                  <button onClick={submitPrediction} disabled={busy || !fieldsComplete} className={`btn btn-primary ${ringIf('submit')}`}>
                     <Lock className="w-4 h-4" /> 予測を提出してロック
                   </button>
                 )}
@@ -367,7 +455,7 @@ export function UnitPage() {
               <label className="block text-sm">
                 {unit.causalExplanation.freeTextPrompt}
                 <textarea
-                  className="mt-1 w-full rounded-lg border border-border bg-background p-2 text-sm"
+                  className="field mt-1"
                   rows={5}
                   value={draft.causalText}
                   onChange={(e) => setDraft({ ...draft, causalText: e.target.value })}
@@ -394,7 +482,7 @@ export function UnitPage() {
                 return (
                   <div key={cf.id} className="border-t border-border pt-3 space-y-1">
                     <div className="text-sm font-medium">反事実：{cf.prompt}</div>
-                    <textarea className="w-full rounded-lg border border-border bg-background p-2 text-sm" rows={3} value={a.text} onChange={(e) => setCf({ ...a, text: e.target.value })} />
+                    <textarea className="field" rows={3} value={a.text} onChange={(e) => setCf({ ...a, text: e.target.value })} />
                     {cf.rubric.map((r) => (
                       <label key={r.id} className="flex gap-2 text-sm items-start">
                         <input type="checkbox" className="mt-1" checked={!!a.checks[r.id]} onChange={(e) => setCf({ ...a, checks: { ...a.checks, [r.id]: e.target.checked } })} />
@@ -404,7 +492,7 @@ export function UnitPage() {
                   </div>
                 );
               })}
-              <button onClick={saveReflection} disabled={busy} className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+              <button onClick={saveReflection} disabled={busy} className={`btn btn-primary ${ringIf(['reflect', 'review'])}`}>
                 自己照合を記録
               </button>
             </Card>
@@ -417,10 +505,10 @@ export function UnitPage() {
             title="ラボ"
             right={
               <div className="flex gap-2">
-                <button onClick={() => labAction(pilotApi.labStart)} disabled={busy} className="text-sm flex items-center gap-1 px-3 py-1 rounded-lg border border-border hover:bg-muted disabled:opacity-50">
+                <button onClick={() => labAction(pilotApi.labStart)} disabled={busy} className="btn btn-outline btn-sm">
                   <Server className="w-4 h-4" /> 起動
                 </button>
-                <button onClick={() => labAction(pilotApi.labReset)} disabled={busy} className="text-sm flex items-center gap-1 px-3 py-1 rounded-lg border border-border hover:bg-muted disabled:opacity-50">
+                <button onClick={() => labAction(pilotApi.labReset)} disabled={busy} className="btn btn-outline btn-sm">
                   <RotateCcw className="w-4 h-4" /> リセット
                 </button>
               </div>
@@ -431,9 +519,9 @@ export function UnitPage() {
             ) : lab ? (
               <div className="text-sm space-y-1" data-testid="lab-status">
                 <div>状態：{lab.running ? '起動中' : '停止'}</div>
-                {lab.busy && <div className="text-amber-200">使用中：{lab.busy.owner}（{lab.busy.since} から）</div>}
+                {lab.busy && <div className="text-warning">使用中：{lab.busy.owner}（{lab.busy.since} から）</div>}
                 {lab.cleanupPending && (
-                  <div className="text-amber-200" data-testid="lab-cleanup-pending">
+                  <div className="text-warning" data-testid="lab-cleanup-pending">
                     後始末中：{cleanupPendingHint(lab.cleanupPending)}
                     <RecoverySteps />
                   </div>
@@ -455,14 +543,14 @@ export function UnitPage() {
               <button
                 onClick={() => run('lab')}
                 disabled={busy || !locked || evidence.length > 0}
-                className="px-4 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50 flex items-center gap-2"
+                className={`btn btn-success ${ringIf('run')}`}
               >
                 <Play className="w-4 h-4" /> ラボで実行（実測）
               </button>
               <button
                 onClick={() => run('fixture')}
                 disabled={busy || !locked || evidence.length > 0}
-                className="px-4 py-2 rounded-lg border border-amber-500 text-amber-300 disabled:opacity-50 flex items-center gap-2"
+                className="btn btn-warning-outline"
               >
                 <FlaskConical className="w-4 h-4" /> フィクスチャで実行（練習用・完了不可）
               </button>
@@ -476,7 +564,7 @@ export function UnitPage() {
               evidence.length > 0 && (
                 <span
                   data-testid="evidence-origin"
-                  className={`text-xs px-2 py-1 rounded-full ${isFixture ? 'bg-amber-500/20 text-amber-200' : 'bg-emerald-500/20 text-emerald-200'}`}
+                  className={`text-xs font-medium px-2 py-1 rounded-full border ${isFixture ? 'border-warning/40 bg-warning/10 text-warning' : 'border-success/40 bg-success/10 text-success'}`}
                 >
                   証拠：{isFixture ? 'フィクスチャ（模擬・完了判定に使えません）' : '実測'}
                 </span>
@@ -488,7 +576,7 @@ export function UnitPage() {
             ) : (
               <div className="space-y-3">
                 {isFixture && (
-                  <div className="rounded-xl border border-amber-500/60 bg-amber-500/10 p-2 text-sm text-amber-200">
+                  <div className="rounded-xl border border-warning/60 bg-warning/10 p-2 text-sm text-warning">
                     これは実測形式のフィクスチャ証拠です。実際のラボで取得したものではありません。
                   </div>
                 )}
@@ -498,9 +586,9 @@ export function UnitPage() {
                     <div key={t.kind}>
                       <div className="text-sm font-semibold">{t.tool}</div>
                       {e ? (
-                        <pre className="text-xs bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto max-h-64">{e.content.trimEnd() || '（出力なし）'}</pre>
+                        <pre className="terminal text-xs rounded-lg p-3 overflow-x-auto max-h-64">{e.content.trimEnd() || '（出力なし）'}</pre>
                       ) : (
-                        <div className="text-sm text-red-400">この証拠はありません</div>
+                        <div className="text-sm text-danger">この証拠はありません</div>
                       )}
                     </div>
                   );
@@ -545,7 +633,7 @@ export function UnitPage() {
                       <td className="py-1 pr-2">{f.label}</td>
                       <td className="py-1 pr-2">{optionLabel(f.fieldId, f.predicted)}</td>
                       <td className="py-1 pr-2">{optionLabel(f.fieldId, f.actual)}</td>
-                      <td className="py-1">{f.correct ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <XCircle className="w-4 h-4 text-red-400" />}</td>
+                      <td className="py-1">{f.correct ? <CheckCircle2 className="w-4 h-4 text-success" aria-label="一致" /> : <XCircle className="w-4 h-4 text-danger" aria-label="不一致" />}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -554,7 +642,7 @@ export function UnitPage() {
                 予測：{evaluation.predictionCorrect ? `全項目が${observedLabel}と一致` : `${evaluation.fields.filter((f) => !f.correct).length} 項目が${observedLabel}と不一致`}
               </div>
               {!evaluation.evidenceConsistent && (evaluation.consistencyIssues ?? []).length > 0 && (
-                <div className="text-sm text-amber-200" data-testid="consistency-issues">
+                <div className="text-sm text-warning" data-testid="consistency-issues">
                   <div className="font-semibold">条件・実行環境から期待される結果との食い違い</div>
                   <ul className="list-disc pl-5">
                     {evaluation.consistencyIssues.map((s) => (
@@ -564,7 +652,7 @@ export function UnitPage() {
                 </div>
               )}
               <div className="text-sm" data-testid="attempt-completion">
-                <div className="font-semibold">この試行：{attempt.completion.completed ? '完了条件を満たした' : '未完了'}</div>
+                <div className={`font-semibold ${attempt.completion.completed ? 'text-success' : ''}`}>この試行：{attempt.completion.completed ? '完了条件を満たした' : '未完了'}</div>
                 {attempt.completion.blockers.length > 0 && (
                   <ul className="list-disc pl-5 text-muted-foreground">
                     {attempt.completion.blockers.map((b) => (
@@ -577,6 +665,6 @@ export function UnitPage() {
           )}
         </div>
       </div>
-    </div>
+    </PageLayout>
   );
 }

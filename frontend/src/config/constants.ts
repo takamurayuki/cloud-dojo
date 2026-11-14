@@ -1,6 +1,12 @@
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 export const WS_URL = import.meta.env.VITE_WS_URL || 'http://localhost:4000';
 
+/**
+ * パイロットモード（vite --mode pilot）。パイロットにはログインが無い設計のため、
+ * 認証ガードを素通しし、DB 前提のページ（Dashboard・Learning Path）をナビから外す。
+ */
+export const IS_PILOT = import.meta.env.MODE === 'pilot';
+
 export const ROUTES = {
   HOME: '/',
   NETWORK: '/network',

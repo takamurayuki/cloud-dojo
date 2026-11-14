@@ -395,7 +395,7 @@ export function KubernetesDeploy() {
             className="bg-card rounded-2xl p-8 border border-border hover:shadow-xl hover:border-primary/50 transition-all duration-300"
             whileHover={{ y: -8 }}
           >
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <BookOpen className="w-5 h-5 text-indigo-500" />
               Kubernetesとは？
             </h3>
@@ -444,7 +444,7 @@ export function KubernetesDeploy() {
             className="bg-card rounded-2xl p-8 border border-border hover:shadow-xl hover:border-primary/50 transition-all duration-300"
             whileHover={{ y: -8 }}
           >
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <Layers className="w-5 h-5 text-purple-500" />
               主要リソース
             </h3>
@@ -488,7 +488,7 @@ export function KubernetesDeploy() {
 
           {/* Try it out */}
           <div className="bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-pink-500/10 border border-indigo-500/20 rounded-2xl p-6">
-            <h3 className="text-xl font-bold mb-3 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
               <Play className="w-5 h-5 text-indigo-500" />
               実際に試してみよう！
             </h3>
@@ -635,7 +635,7 @@ export function KubernetesDeploy() {
           className="bg-card border border-border rounded-2xl p-8 hover:shadow-xl hover:border-primary/50 transition-all duration-300"
         >
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-bold flex items-center gap-2">
+            <h2 className="text-xl font-bold flex items-center gap-2">
               <Box className="w-6 h-6 text-primary" />
               Pods
             </h2>
@@ -703,7 +703,7 @@ export function KubernetesDeploy() {
           className="bg-card border border-border rounded-2xl p-6"
         >
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-bold flex items-center gap-2">
+            <h2 className="text-xl font-bold flex items-center gap-2">
               <Layers className="w-6 h-6 text-primary" />
               Deployments
             </h2>
@@ -768,7 +768,7 @@ export function KubernetesDeploy() {
           className="bg-card border border-border rounded-2xl p-6"
         >
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-bold flex items-center gap-2">
+            <h2 className="text-xl font-bold flex items-center gap-2">
               <Globe className="w-6 h-6 text-primary" />
               Services
             </h2>
@@ -852,7 +852,7 @@ export function KubernetesDeploy() {
             animate={{ opacity: 1, scale: 1 }}
             className="bg-card border border-border rounded-2xl p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto"
           >
-            <h3 className="text-xl font-bold mb-4">マニフェストテンプレート</h3>
+            <h3 className="text-lg font-bold mb-4">マニフェストテンプレート</h3>
             <div className="space-y-3">
               {manifestTemplates.map((template, index) => (
                 <button

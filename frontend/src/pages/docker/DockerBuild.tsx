@@ -22,6 +22,7 @@ import { useState, useEffect } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import axios from 'axios';
 import { PageLayout } from '@/layouts/PageLayout';
+import { PageHeader } from '@/layouts/PageHeader';
 import { Tabs } from '@/components/ui/tabs/Tabs';
 import { TabItem } from '@/components/ui/tabs/types';
 import { NoteEditor } from '@/components/ui/notes/NoteEditor';
@@ -484,18 +485,12 @@ export function DockerBuild() {
   return (
     <PageLayout>
       {/* Header */}
-      <motion.div
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex items-center justify-between"
-      >
-        <div>
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">
-            Docker Build
-          </h1>
-          <p className="text-muted-foreground">実際のDocker環境でコンテナをビルド・管理</p>
-        </div>
-      </motion.div>
+      <PageHeader
+        title="Docker Build"
+        description="実際のDocker環境でコンテナをビルド・管理"
+        Icon={Container}
+        bgColor="bg-gradient-to-br from-blue-600 to-cyan-500"
+      />
 
       {/* Tabs */}
       <Tabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
@@ -507,7 +502,7 @@ export function DockerBuild() {
             className="bg-card rounded-2xl p-8 border border-border hover:shadow-xl hover:border-primary/50 transition-all duration-300"
             whileHover={{ y: -8 }}
           >
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <BookOpen className="w-5 h-5 text-blue-500" />
               Docker Buildとは？
             </h3>
@@ -552,43 +547,43 @@ export function DockerBuild() {
             className="bg-card rounded-2xl p-8 border border-border hover:shadow-xl hover:border-primary/50 transition-all duration-300"
             whileHover={{ y: -8 }}
           >
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <FileCode className="w-5 h-5 text-purple-500" />
               Dockerfileの主要命令
             </h3>
             <div className="grid gap-3 md:grid-cols-2">
               <div className="bg-secondary/50 rounded-lg p-3">
-                <code className="px-2 py-1 bg-purple-500/20 text-purple-400 rounded text-sm font-bold">
+                <code className="px-2 py-1 bg-purple-500/20 text-purple-600 dark:text-purple-400 rounded text-sm font-bold">
                   FROM
                 </code>
                 <p className="text-sm mt-1">ベースイメージの指定</p>
               </div>
               <div className="bg-secondary/50 rounded-lg p-3">
-                <code className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-sm font-bold">
+                <code className="px-2 py-1 bg-blue-500/20 text-blue-600 dark:text-blue-400 rounded text-sm font-bold">
                   WORKDIR
                 </code>
                 <p className="text-sm mt-1">作業ディレクトリの設定</p>
               </div>
               <div className="bg-secondary/50 rounded-lg p-3">
-                <code className="px-2 py-1 bg-green-500/20 text-green-400 rounded text-sm font-bold">
+                <code className="px-2 py-1 bg-green-500/20 text-green-700 dark:text-green-400 rounded text-sm font-bold">
                   COPY
                 </code>
                 <p className="text-sm mt-1">ファイルのコピー</p>
               </div>
               <div className="bg-secondary/50 rounded-lg p-3">
-                <code className="px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded text-sm font-bold">
+                <code className="px-2 py-1 bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 rounded text-sm font-bold">
                   RUN
                 </code>
                 <p className="text-sm mt-1">コマンドの実行</p>
               </div>
               <div className="bg-secondary/50 rounded-lg p-3">
-                <code className="px-2 py-1 bg-orange-500/20 text-orange-400 rounded text-sm font-bold">
+                <code className="px-2 py-1 bg-orange-500/20 text-orange-700 dark:text-orange-400 rounded text-sm font-bold">
                   EXPOSE
                 </code>
                 <p className="text-sm mt-1">ポートの公開</p>
               </div>
               <div className="bg-secondary/50 rounded-lg p-3">
-                <code className="px-2 py-1 bg-red-500/20 text-red-400 rounded text-sm font-bold">
+                <code className="px-2 py-1 bg-red-500/20 text-red-700 dark:text-red-400 rounded text-sm font-bold">
                   CMD
                 </code>
                 <p className="text-sm mt-1">デフォルトコマンド</p>
@@ -600,7 +595,7 @@ export function DockerBuild() {
             className="bg-card rounded-2xl p-8 border border-border hover:shadow-xl hover:border-primary/50 transition-all duration-300"
             whileHover={{ y: -8 }}
           >
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <Layers className="w-5 h-5 text-cyan-500" />
               レイヤーの概念
             </h3>
@@ -631,7 +626,7 @@ export function DockerBuild() {
             className="bg-card rounded-2xl p-8 border border-border hover:shadow-xl hover:border-primary/50 transition-all duration-300"
             whileHover={{ y: -8 }}
           >
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5 text-green-500" />
               ベストプラクティス
             </h3>
@@ -671,7 +666,7 @@ export function DockerBuild() {
             className="bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-pink-500/10 border border-blue-500/20 rounded-2xl p-8 hover:shadow-xl hover:border-blue-500/40 transition-all duration-300"
             whileHover={{ y: -8 }}
           >
-            <h3 className="text-xl font-bold mb-3 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
               <Play className="w-5 h-5 text-blue-500" />
               実際に試してみよう！
             </h3>
@@ -725,7 +720,7 @@ export function DockerBuild() {
             >
               <div className="flex items-center gap-2 mb-6">
                 <Layers className="w-6 h-6 text-primary" />
-                <h2 className="text-2xl font-bold">ビルドステップ</h2>
+                <h2 className="text-xl font-bold">ビルドステップ</h2>
                 {buildSession && (
                   <span className="ml-auto text-sm text-muted-foreground">
                     {buildSession.imageName}:{buildSession.imageTag}
@@ -784,7 +779,7 @@ export function DockerBuild() {
                             {step.command}
                           </code>
                           {step.output && (
-                            <div className="mt-2 p-2 bg-black/50 rounded text-xs font-mono text-green-400 max-h-24 overflow-y-auto whitespace-pre-wrap">
+                            <div className="mt-2 p-2 terminal rounded text-xs font-mono text-green-700 dark:text-green-400 max-h-24 overflow-y-auto whitespace-pre-wrap">
                               {step.output}
                             </div>
                           )}
@@ -1012,7 +1007,7 @@ export function DockerBuild() {
         >
           <div className="flex items-center gap-2 mb-6">
             <Container className="w-6 h-6 text-primary" />
-            <h2 className="text-2xl font-bold">コンテナ一覧</h2>
+            <h2 className="text-xl font-bold">コンテナ一覧</h2>
           </div>
 
           {containers.length === 0 ? (
@@ -1035,7 +1030,7 @@ export function DockerBuild() {
                           className={`text-xs px-2 py-1 rounded-full ${
                             container.state === 'running'
                               ? 'bg-green-500/20 text-green-500'
-                              : 'bg-gray-500/20 text-gray-500'
+                              : 'bg-muted text-muted-foreground'
                           }`}
                         >
                           {container.state}
@@ -1100,7 +1095,7 @@ export function DockerBuild() {
         >
           <div className="flex items-center gap-2 mb-6">
             <Package className="w-6 h-6 text-primary" />
-            <h2 className="text-2xl font-bold">イメージ一覧</h2>
+            <h2 className="text-xl font-bold">イメージ一覧</h2>
           </div>
 
           {images.length === 0 ? (
@@ -1174,7 +1169,7 @@ export function DockerBuild() {
               onClick={(e) => e.stopPropagation()}
               className="bg-card border border-border rounded-2xl p-6 w-full max-w-md mx-4"
             >
-              <h3 className="text-xl font-bold mb-4">コンテナを実行</h3>
+              <h3 className="text-lg font-bold mb-4">コンテナを実行</h3>
               <div className="space-y-4">
                 <div>
                   <label className="text-sm text-muted-foreground mb-2 block">イメージ</label>
@@ -1258,7 +1253,7 @@ export function DockerBuild() {
               className="bg-card border border-border rounded-2xl p-6 w-full max-w-3xl mx-4 max-h-[80vh] flex flex-col"
             >
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-bold">コンテナログ</h3>
+                <h3 className="text-lg font-bold">コンテナログ</h3>
                 <button
                   onClick={() => setSelectedContainerLogs(null)}
                   className="px-4 py-2 rounded-xl border border-border hover:bg-accent transition-colors"
@@ -1266,7 +1261,7 @@ export function DockerBuild() {
                   閉じる
                 </button>
               </div>
-              <div className="flex-1 overflow-auto bg-black/50 rounded-lg p-4 font-mono text-xs text-green-400 whitespace-pre-wrap">
+              <div className="flex-1 overflow-auto terminal rounded-lg p-4 font-mono text-xs text-green-700 dark:text-green-400 whitespace-pre-wrap">
                 {containerLogs || 'ログがありません'}
               </div>
             </motion.div>
@@ -1288,7 +1283,7 @@ export function DockerBuild() {
               onClick={(e) => e.stopPropagation()}
               className="bg-card border border-border rounded-2xl p-6 w-full max-w-4xl mx-4 max-h-[80vh] overflow-auto"
             >
-              <h3 className="text-xl font-bold mb-4">Dockerfile テンプレート</h3>
+              <h3 className="text-lg font-bold mb-4">Dockerfile テンプレート</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {Object.entries(dockerfileTemplates).map(([key, template]) => (
                   <button
@@ -1339,7 +1334,7 @@ export function DockerBuild() {
             >
               <div className="flex items-center gap-3 mb-6">
                 <BookOpen className="w-6 h-6 text-primary" />
-                <h3 className="text-2xl font-bold">Docker学習ガイド</h3>
+                <h3 className="text-lg font-bold">Docker学習ガイド</h3>
               </div>
 
               {selectedInstruction ? (
@@ -1353,7 +1348,7 @@ export function DockerBuild() {
                   {dockerInstructions[selectedInstruction as keyof typeof dockerInstructions] && (
                     <div className="space-y-4">
                       <div>
-                        <h4 className="text-xl font-bold mb-2">
+                        <h4 className="text-lg font-bold mb-2">
                           {
                             dockerInstructions[
                               selectedInstruction as keyof typeof dockerInstructions

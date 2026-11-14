@@ -10,10 +10,12 @@ import {
   Activity,
   Container,
   Network,
+  LayoutDashboard,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { ROUTES } from '@/config/constants';
 import { PageLayout } from '@/layouts/PageLayout';
+import { PageHeader } from '@/layouts/PageHeader';
 
 const stats = [
   {
@@ -23,6 +25,7 @@ const stats = [
     icon: CheckCircle2,
     color: 'from-green-500 to-emerald-500',
     bgColor: 'bg-green-500/10',
+    iconColor: 'text-green-700 dark:text-green-400',
   },
   {
     label: 'Learning Streak',
@@ -31,6 +34,7 @@ const stats = [
     icon: TrendingUp,
     color: 'from-blue-500 to-cyan-500',
     bgColor: 'bg-blue-500/10',
+    iconColor: 'text-blue-700 dark:text-blue-400',
   },
   {
     label: 'Achievements',
@@ -39,6 +43,7 @@ const stats = [
     icon: Award,
     color: 'from-yellow-500 to-orange-500',
     bgColor: 'bg-yellow-500/10',
+    iconColor: 'text-amber-700 dark:text-yellow-400',
   },
   {
     label: 'Total Time',
@@ -47,6 +52,7 @@ const stats = [
     icon: Clock,
     color: 'from-purple-500 to-pink-500',
     bgColor: 'bg-purple-500/10',
+    iconColor: 'text-purple-700 dark:text-purple-400',
   },
 ];
 
@@ -66,16 +72,12 @@ export function Dashboard() {
   return (
     <PageLayout>
       {/* Header */}
-      <motion.div
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
-        <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-          Welcome back! 👋
-        </h1>
-        <p className="text-muted-foreground text-lg">Continue your DevOps learning journey</p>
-      </motion.div>
+      <PageHeader
+        title="Welcome back! 👋"
+        description="Continue your DevOps learning journey"
+        Icon={LayoutDashboard}
+        bgColor="bg-gradient-to-br from-blue-500 to-purple-600"
+      />
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -99,12 +101,9 @@ export function Dashboard() {
                   <div
                     className={`w-12 h-12 rounded-xl ${stat.bgColor} flex items-center justify-center`}
                   >
-                    <stat.icon
-                      className={`w-6 h-6 bg-gradient-to-br ${stat.color} bg-clip-text text-transparent`}
-                      style={{ WebkitTextFillColor: 'transparent' }}
-                    />
+                    <stat.icon className={`w-6 h-6 ${stat.iconColor}`} />
                   </div>
-                  <span className="text-xs text-green-600 dark:text-green-400 font-medium flex items-center gap-1">
+                  <span className="text-xs text-success font-medium flex items-center gap-1">
                     <TrendingUp className="w-3 h-3" />
                     {stat.change}
                   </span>
@@ -131,7 +130,7 @@ export function Dashboard() {
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-2">
               <Target className="w-6 h-6 text-primary" />
-              <h2 className="text-2xl font-bold">Learning Progress</h2>
+              <h2 className="section-title">Learning Progress</h2>
             </div>
             <Link
               to={ROUTES.LEARNING}
@@ -182,7 +181,7 @@ export function Dashboard() {
         >
           <div className="flex items-center gap-2 mb-6">
             <Activity className="w-6 h-6 text-primary" />
-            <h2 className="text-2xl font-bold">Recent Activity</h2>
+            <h2 className="section-title">Recent Activity</h2>
           </div>
 
           <div className="space-y-4">
@@ -218,7 +217,7 @@ export function Dashboard() {
       >
         <div className="flex items-center gap-2 mb-6">
           <Zap className="w-6 h-6 text-primary" />
-          <h2 className="text-2xl font-bold">Quick Actions</h2>
+          <h2 className="section-title">Quick Actions</h2>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -226,7 +225,7 @@ export function Dashboard() {
             to={ROUTES.DOCKER}
             className="group relative overflow-hidden rounded-xl p-6 border-2 border-transparent hover:border-blue-500 transition-all duration-300 bg-gradient-to-br from-blue-500/10 to-cyan-500/10 hover:shadow-lg"
           >
-            <Container className="w-8 h-8 text-blue-500 mb-3 group-hover:scale-110 transition-transform" />
+            <Container className="w-8 h-8 text-blue-600 dark:text-blue-400 mb-3 group-hover:scale-110 transition-transform" />
             <h3 className="font-semibold mb-1">Start Docker Build</h3>
             <p className="text-sm text-muted-foreground">Build and visualize containers</p>
             <ArrowRight className="absolute bottom-4 right-4 w-5 h-5 opacity-0 group-hover:opacity-100 group-hover:translate-x-1 transition-all" />
@@ -236,7 +235,7 @@ export function Dashboard() {
             to={ROUTES.KUBERNETES}
             className="group relative overflow-hidden rounded-xl p-6 border-2 border-transparent hover:border-purple-500 transition-all duration-300 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 hover:shadow-lg"
           >
-            <Network className="w-8 h-8 text-purple-500 mb-3 group-hover:scale-110 transition-transform" />
+            <Network className="w-8 h-8 text-purple-600 dark:text-purple-400 mb-3 group-hover:scale-110 transition-transform" />
             <h3 className="font-semibold mb-1">Deploy to K8s</h3>
             <p className="text-sm text-muted-foreground">Visualize deployments</p>
             <ArrowRight className="absolute bottom-4 right-4 w-5 h-5 opacity-0 group-hover:opacity-100 group-hover:translate-x-1 transition-all" />
@@ -246,7 +245,7 @@ export function Dashboard() {
             to={ROUTES.LEARNING}
             className="group relative overflow-hidden rounded-xl p-6 border-2 border-transparent hover:border-green-500 transition-all duration-300 bg-gradient-to-br from-green-500/10 to-emerald-500/10 hover:shadow-lg"
           >
-            <Target className="w-8 h-8 text-green-500 mb-3 group-hover:scale-110 transition-transform" />
+            <Target className="w-8 h-8 text-green-600 dark:text-green-400 mb-3 group-hover:scale-110 transition-transform" />
             <h3 className="font-semibold mb-1">Continue Learning</h3>
             <p className="text-sm text-muted-foreground">Resume your path</p>
             <ArrowRight className="absolute bottom-4 right-4 w-5 h-5 opacity-0 group-hover:opacity-100 group-hover:translate-x-1 transition-all" />
