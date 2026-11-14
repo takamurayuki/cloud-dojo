@@ -141,7 +141,7 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     不正な型として `error` にする。コントローラ系は observedGeneration ≧ generation に加えて、
     全体・更新済み・利用可能の数がすべて希望数と一致し（旧レプリカが残っていない）、利用不可が 0 または未設定のときだけ準備完了とする。判定するのは
     Deployment・StatefulSet（全体・更新済み・準備完了・利用可能のレプリカ数）、ReplicaSet（全体・準備完了・利用可能の数）、DaemonSet（配置・更新済み・利用可能・利用不可の数）、Pod（Running かつ Ready、または Succeeded）、
-    Job（Complete）、Service（clusterIP の割り当て。LoadBalancer は status.loadBalancer.ingress に ip または hostname が空でない文字列の要素があること。有効な要素が無ければ未割り当てとして待ち、要素の構造が不正（null・オブジェクト以外・ip／hostname が文字列以外）なら `error`。Endpoints は見ない）、PersistentVolumeClaim（Bound）、
+    Job（Complete）、Service（clusterIP の割り当て。LoadBalancer は status.loadBalancer.ingress に ip または hostname が空でない文字列の要素があること。有効な要素が無ければ未割り当てとして待ち、要素の構造が不正（null・オブジェクト以外・ip／hostname が文字列以外）なら `error`。LoadBalancer の構造検証は clusterIP の割り当て判定より先に行い、clusterIP が未割り当てでも不正な構造は待たずに `error`。Endpoints は見ない）、PersistentVolumeClaim（Bound）、
     Namespace（Active）。それ以外の種別（ConfigMap・Secret・CRD 等）は存在だけを確かめて `unverified`（判定不能）とし、`ready` とはみなさない。
     内訳はセッションの `verification`（ready・unverified・failed）に入る。mock モードの模擬適用は従来どおり
   - CI/CD の real 実行（`POST /api/cicd/run` の `executionMode: real`）：許可パターン（`echo …`、`node`・`npm`・`pnpm`・

@@ -25,6 +25,10 @@
  *   条件のいずれでも不正な型として failed（確認できない応答）にする（必須1）。
  * - LoadBalancer の ingress は要素ごとに検証する。ip または hostname が空でない文字列の要素が無ければ pending、
  *   要素の構造が不正なら failed（必須2）。
+ *
+ * 直し回16：
+ * - LoadBalancer は status.loadBalancer の構造検証を clusterIP の判定より先に行う。clusterIP が未割り当てでも、
+ *   不正な構造は pending にせず failed にする。順序の変更は LoadBalancer に限る。
  */
 
 export type ReadinessState = 'ready' | 'pending' | 'failed' | 'unverifiable';
@@ -306,10 +310,13 @@ function judgeKind(kind: string, o: Obj): ReadinessJudgement {
       if (type !== 'ClusterIP' && type !== 'NodePort' && type !== 'LoadBalancer') {
         throw new MalformedResponse(`spec.type が想定外の値です（${show(type)}）`);
       }
+      // 直し回16：LoadBalancer は status.loadBalancer の構造検証を clusterIP の判定より先に行う。
+      // clusterIP が未割り当てでも、不正な構造（null・ingress 要素の不正等）は pending に読み替えずに確認できない応答にする。
+      // 順序の変更は LoadBalancer に限る（ClusterIP・NodePort・ExternalName は status.loadBalancer を判定に使わない）
+      const addrs = type === 'LoadBalancer' ? lbAddresses(o) : [];
       const clusterIP = optString(o, 'spec.clusterIP');
       if (!clusterIP) return { state: 'pending', detail: `${type}：clusterIP がまだ割り当てられていません` };
       if (type === 'LoadBalancer') {
-        const addrs = lbAddresses(o);
         return addrs.length > 0
           ? { state: 'ready', detail: `LoadBalancer：外部アドレス割り当て済み（${addrs.join('、')}／clusterIP ${clusterIP}）` }
           : { state: 'pending', detail: `LoadBalancer：外部アドレスがまだ割り当てられていません（clusterIP ${clusterIP}）` };
