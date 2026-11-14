@@ -1,10 +1,26 @@
 <!DOCTYPE html>
-<html lang="ja" class="dark">
+<html lang="ja">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/png" href="/src/assets/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Cloud Dojo - DevOps Learning Platform</title>
+    <script>
+      // 初回描画前にテーマを決める（ちらつき防止）。規則は src/contexts/ThemeContext.tsx と同じ：
+      // 保存された選択があればそれ、無ければ OS の設定。
+      (function () {
+        var theme = null;
+        try {
+          var v = localStorage.getItem('cloud-dojo-theme');
+          if (v === 'light' || v === 'dark') theme = v;
+        } catch (e) {}
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        if (theme === 'dark') document.documentElement.classList.add('dark');
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
   </head>
   <body class="antialiased">
     <div id="root"></div>

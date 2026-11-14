@@ -12,8 +12,12 @@ import {
   FlaskConical,
   Pin,
   PinOff,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import { ROUTES } from '@/config/constants';
+import { useTheme } from '@/contexts/ThemeContext';
+import logoUrl from '@/assets/cloud-dojo-logo.png';
 
 const navItems = [
   {
@@ -78,6 +82,8 @@ export function Navigation() {
   const hoverTimerRef = useRef<number | null>(null);
 
   const isExpanded = isPinned || isHovered;
+  const { theme, toggleTheme } = useTheme();
+  const nextThemeLabel = theme === 'dark' ? 'ライト表示に切り替え' : 'ダーク表示に切り替え';
 
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
@@ -123,7 +129,7 @@ export function Navigation() {
 
   return (
     <motion.nav
-      className="w-64 border-r bg-card relative overflow-hidden"
+      className="w-64 shrink-0 border-r border-border bg-card relative overflow-hidden"
       animate={{ width: isExpanded ? 256 : 64 }}
       transition={{ type: 'spring', stiffness: 300, damping: 30 }}
       onMouseEnter={handleMouseEnter}
@@ -131,56 +137,74 @@ export function Navigation() {
       aria-expanded={isExpanded}
     >
       {/* Background gradient */}
-      <div className="absolute inset-0 gradient-mesh opacity-50" />
+      <div className="absolute inset-0 gradient-mesh opacity-40" />
 
       <div className="relative z-10 flex flex-col h-full">
-        <div className="p-3 pt-5 border-b border-border/50 flex items-center justify-between gap-2">
-          <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5 }}
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-10 h-10 rounded-lg bg-gradient-to-r bg-gray-200 flex items-center justify-center text-2xl">
-                <img src="/icons/cloud-dojo.png" alt="cloud-dojo" width={50} height={50} />
-              </div>
-              <AnimatePresence mode="wait">
+        <div className="p-3 pt-4 border-b border-border space-y-3">
+          {/* ロゴ：画像は src/assets から読み込む（以前は配信されない /icons/ を参照していて代替テキストが重なっていた） */}
+          <div className={`flex items-center h-10 ${isExpanded ? 'gap-2' : 'justify-center'}`}>
+            <NavLink
+              to={ROUTES.HOME}
+              className="flex items-center gap-2 min-w-0 rounded-lg"
+              aria-label="Cloud Dojo ホーム"
+            >
+              <img src={logoUrl} alt="" width={36} height={36} className="w-9 h-9 shrink-0 object-contain" />
+              <AnimatePresence initial={false}>
                 {isExpanded && (
-                  <motion.div
-                    initial={{ opacity: 0, width: 0 }}
-                    animate={{ opacity: 1, width: 'auto' }}
-                    exit={{ opacity: 0, width: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="overflow-hidden"
-                  >
-                    <h1 className="w-40 flex-shrink-0 text-xl font-bold bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">
-                      Cloud Dojo
-                    </h1>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-              {/* ピンボタン */}
-              <AnimatePresence>
-                {isExpanded && (
-                  <motion.button
-                    initial={{ opacity: 0, scale: 0.8 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.8 }}
+                  <motion.span
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
                     transition={{ duration: 0.15 }}
-                    onClick={togglePin}
-                    aria-label={isPinned ? 'ナビゲーション固定を解除' : 'ナビゲーションを固定'}
-                    aria-pressed={isPinned}
-                    title={isPinned ? '固定解除' : '固定'}
+                    className="text-lg font-bold tracking-tight text-foreground whitespace-nowrap"
                   >
-                    {isPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
-                  </motion.button>
+                    Cloud Dojo
+                  </motion.span>
                 )}
               </AnimatePresence>
-            </div>
-          </motion.div>
+            </NavLink>
+            {/* ピンボタン */}
+            <AnimatePresence>
+              {isExpanded && (
+                <motion.button
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  transition={{ duration: 0.15 }}
+                  onClick={togglePin}
+                  className={`ml-auto p-1.5 rounded-md transition-colors hover:bg-muted ${isPinned ? 'text-primary' : 'text-muted-foreground'}`}
+                  aria-label={isPinned ? 'ナビゲーション固定を解除' : 'ナビゲーションを固定'}
+                  aria-pressed={isPinned}
+                  title={isPinned ? '固定解除' : '固定'}
+                >
+                  {isPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
+                </motion.button>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* テーマ切替：アイコンと「いまの表示」を出す。折りたたみ時はアイコンのみ（ツールチップに説明） */}
+          <button
+            type="button"
+            onClick={toggleTheme}
+            data-testid="theme-toggle"
+            aria-label={`表示テーマ：${theme === 'dark' ? 'ダーク' : 'ライト'}（${nextThemeLabel}）`}
+            title={nextThemeLabel}
+            className={`w-full flex items-center h-9 rounded-lg border border-border bg-background/60 text-sm text-foreground hover:bg-muted transition-colors ${
+              isExpanded ? 'gap-2 px-3' : 'justify-center'
+            }`}
+          >
+            {theme === 'dark' ? <Moon className="w-4 h-4 shrink-0" /> : <Sun className="w-4 h-4 shrink-0 text-amber-600" />}
+            {isExpanded && (
+              <span className="whitespace-nowrap">
+                {theme === 'dark' ? 'ダーク' : 'ライト'}
+                <span className="text-muted-foreground">（切替）</span>
+              </span>
+            )}
+          </button>
         </div>
 
-        <div className="space-y-2 p-3 mt-2">
+        <div className="space-y-1.5 p-3 mt-1">
           {navItems.map((item, index) => (
             <motion.div
               key={item.to}
@@ -190,27 +214,25 @@ export function Navigation() {
             >
               <NavLink
                 to={item.to}
+                end={item.to === ROUTES.HOME}
+                title={isExpanded ? undefined : item.label}
                 className={({ isActive }) =>
-                  `group flex items-center ${isExpanded ? 'gap-3 px-3' : 'justify-center px-2'} py-3 rounded-xl transition-all duration-200 relative overflow-hidden ${
+                  `group flex items-center ${isExpanded ? 'gap-3 px-3' : 'justify-center px-2'} py-2.5 rounded-xl transition-colors duration-200 relative overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                     isActive
-                      ? 'bg-gradient-to-r ' + item.color + ' text-white shadow-lg scale-105'
-                      : 'hover:bg-accent/50 hover:scale-102 hover:shadow-md'
+                      ? 'bg-gradient-to-r ' + item.color + ' text-white shadow-md font-semibold'
+                      : 'text-foreground/85 hover:bg-muted hover:text-foreground'
                   }`
                 }
               >
                 {({ isActive }) => (
                   <>
+                    {/* 現在地：左端のバー（折りたたみ時も見える） */}
                     {isActive && (
-                      <motion.div
-                        layoutId="activeNav"
-                        className="absolute inset-0 bg-gradient-to-r opacity-20"
-                        initial={false}
-                        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-                      />
+                      <span aria-hidden className="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r bg-white/90" />
                     )}
                     <item.icon
-                      className={`w-5 h-5 relative z-10 transition-transform group-hover:scale-110 ${
-                        isActive ? '' : 'text-muted-foreground'
+                      className={`w-5 h-5 shrink-0 relative z-10 transition-transform group-hover:scale-110 ${
+                        isActive ? '' : 'text-muted-foreground group-hover:text-foreground'
                       }`}
                     />
                     <AnimatePresence mode="wait">
@@ -220,19 +242,16 @@ export function Navigation() {
                           animate={{ opacity: 1, width: 'auto' }}
                           exit={{ opacity: 0, width: 0 }}
                           transition={{ duration: 0.15 }}
-                          className="font-medium relative z-10 whitespace-nowrap overflow-hidden"
+                          className="relative z-10 text-sm whitespace-nowrap overflow-hidden text-ellipsis"
                         >
                           {item.label}
                         </motion.span>
                       )}
                     </AnimatePresence>
                     {isActive && isExpanded && (
-                      <motion.div
-                        className="ml-auto w-2 h-2 bg-white rounded-full flex-shrink-0"
-                        initial={{ scale: 0 }}
-                        animate={{ scale: 1 }}
-                        transition={{ type: 'spring', stiffness: 500, damping: 15 }}
-                      />
+                      <span className="ml-auto shrink-0 whitespace-nowrap text-[10px] font-semibold tracking-wide bg-white/25 rounded px-1.5 py-0.5 relative z-10">
+                        現在地
+                      </span>
                     )}
                   </>
                 )}

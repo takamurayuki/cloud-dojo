@@ -379,7 +379,7 @@ export function NetworkBasics() {
           ref={(el) => {
             if (el) outputRefs.current.set(nodeId, el);
           }}
-          className="flex-1 bg-gray-900 p-4 overflow-auto font-mono text-sm"
+          className="flex-1 terminal border-0 p-4 overflow-auto font-mono text-sm"
         >
           <pre className="text-green-400 whitespace-pre-wrap">{session.output}</pre>
         </div>
@@ -387,7 +387,7 @@ export function NetworkBasics() {
         {isActive && (
           <div className="p-3 border-t bg-muted/30">
             <div className="flex gap-2">
-              <span className="text-green-400 font-mono">$</span>
+              <span className="text-green-700 dark:text-green-400 font-mono">$</span>
               <input
                 type="text"
                 value={command}
@@ -442,7 +442,7 @@ export function NetworkBasics() {
               <div className="p-3 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-lg shadow-lg">
                 <Network className="w-6 h-6 text-white" />
               </div>
-              <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+              <h2 className="text-xl font-bold bg-gradient-to-r from-blue-600 dark:from-blue-400 to-cyan-600 dark:to-cyan-400 bg-clip-text text-transparent">
                 ネットワークとは？
               </h2>
             </div>
@@ -453,19 +453,19 @@ export function NetworkBasics() {
               </p>
               <div className="grid md:grid-cols-3 gap-4">
                 <div className="bg-blue-500/5 rounded-lg p-4 border border-blue-500/20 hover:border-blue-500/40 transition-colors">
-                  <h3 className="font-bold text-blue-400 mb-2">物理層</h3>
+                  <h3 className="font-bold text-blue-600 dark:text-blue-400 mb-2">物理層</h3>
                   <p className="text-sm text-muted-foreground">
                     ケーブル、無線、光ファイバーなどの物理的な接続
                   </p>
                 </div>
                 <div className="bg-cyan-500/5 rounded-lg p-4 border border-cyan-500/20 hover:border-cyan-500/40 transition-colors">
-                  <h3 className="font-bold text-cyan-400 mb-2">論理層</h3>
+                  <h3 className="font-bold text-cyan-700 dark:text-cyan-400 mb-2">論理層</h3>
                   <p className="text-sm text-muted-foreground">
                     IPアドレス、ルーティング、プロトコルなどの論理的な仕組み
                   </p>
                 </div>
                 <div className="bg-teal-500/5 rounded-lg p-4 border border-teal-500/20 hover:border-teal-500/40 transition-colors">
-                  <h3 className="font-bold text-teal-400 mb-2">アプリケーション層</h3>
+                  <h3 className="font-bold text-teal-700 dark:text-teal-400 mb-2">アプリケーション層</h3>
                   <p className="text-sm text-muted-foreground">
                     HTTP、DNS、SSH などのアプリケーションプロトコル
                   </p>
@@ -480,7 +480,7 @@ export function NetworkBasics() {
               <div className="p-3 bg-gradient-to-br from-purple-500 to-pink-500 rounded-lg shadow-lg">
                 <BookOpen className="w-6 h-6 text-white" />
               </div>
-              <h2 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+              <h2 className="text-xl font-bold bg-gradient-to-r from-purple-600 dark:from-purple-400 to-pink-600 dark:to-pink-400 bg-clip-text text-transparent">
                 OSI参照モデル
               </h2>
             </div>
@@ -548,7 +548,7 @@ export function NetworkBasics() {
               <div className="p-3 bg-gradient-to-br from-green-500 to-emerald-500 rounded-lg shadow-lg">
                 <Zap className="w-6 h-6 text-white" />
               </div>
-              <h2 className="text-2xl font-bold bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent">
+              <h2 className="text-xl font-bold bg-gradient-to-r from-green-600 dark:from-green-400 to-emerald-600 dark:to-emerald-400 bg-clip-text text-transparent">
                 TCP/IP プロトコル
               </h2>
             </div>
@@ -623,7 +623,7 @@ export function NetworkBasics() {
               <div className="p-3 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg shadow-lg">
                 <Terminal className="w-6 h-6 text-white" />
               </div>
-              <h2 className="text-2xl font-bold bg-gradient-to-r from-orange-400 to-amber-400 bg-clip-text text-transparent">
+              <h2 className="text-xl font-bold bg-gradient-to-r from-orange-600 dark:from-orange-400 to-amber-600 dark:to-amber-400 bg-clip-text text-transparent">
                 重要なLinuxネットワークコマンド
               </h2>
             </div>
@@ -633,8 +633,8 @@ export function NetworkBasics() {
                   <span className="bg-orange-500 text-white text-xs px-2 py-1 rounded">基本</span>
                   ネットワーク情報の確認
                 </h3>
-                <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                  <pre className="text-sm text-gray-100">
+                <div className="terminal rounded-lg p-4 overflow-x-auto">
+                  <pre className="text-sm">
                     <code>{`# IPアドレスとインターフェース確認
 ip addr show
 
@@ -658,8 +658,8 @@ ip route | grep default`}</code>
                   <span className="bg-orange-500 text-white text-xs px-2 py-1 rounded">診断</span>
                   接続の確認
                 </h3>
-                <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                  <pre className="text-sm text-gray-100">
+                <div className="terminal rounded-lg p-4 overflow-x-auto">
+                  <pre className="text-sm">
                     <code>{`# 疎通確認（ICMP Echo）
 ping -c 4 192.168.1.1
 
@@ -681,8 +681,8 @@ nc -zv 192.168.1.1 80`}</code>
                   <span className="bg-orange-500 text-white text-xs px-2 py-1 rounded">詳細</span>
                   パケット解析
                 </h3>
-                <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                  <pre className="text-sm text-gray-100">
+                <div className="terminal rounded-lg p-4 overflow-x-auto">
+                  <pre className="text-sm">
                     <code>{`# パケットキャプチャ（10パケット）
 tcpdump -i any -c 10
 
@@ -703,8 +703,8 @@ tcpdump -i any -vv -A port 80`}</code>
                   <span className="bg-orange-500 text-white text-xs px-2 py-1 rounded">状態</span>
                   接続とポートの確認
                 </h3>
-                <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto border border-gray-700">
-                  <pre className="text-sm text-gray-100">
+                <div className="terminal rounded-lg p-4 overflow-x-auto">
+                  <pre className="text-sm">
                     <code>{`# リスニングポート一覧
 netstat -tuln
 ss -tuln
@@ -725,7 +725,7 @@ ss -tulnp`}</code>
           {/* 実践への誘導 */}
           <div className="bg-gradient-to-br from-indigo-500/10 to-violet-500/10 rounded-xl border border-indigo-500/20 p-8 text-center">
             <FlaskConical className="w-16 h-16 mx-auto mb-4 text-indigo-500" />
-            <h3 className="text-xl font-bold mb-2">実践で学ぼう！</h3>
+            <h3 className="text-lg font-bold mb-2">実践で学ぼう！</h3>
             <p className="text-muted-foreground mb-6">
               「実践ラボ」タブで実際にコマンドを実行して、ネットワークの動作を体験できます。
             </p>
@@ -901,7 +901,7 @@ ss -tulnp`}</code>
               className="bg-card border rounded-xl p-12 text-center"
             >
               <Network className="w-16 h-16 mx-auto mb-4 opacity-50" />
-              <h3 className="text-xl font-semibold mb-2">ラボ環境がありません</h3>
+              <h3 className="text-lg font-semibold mb-2">ラボ環境がありません</h3>
               <p className="text-muted-foreground mb-6">
                 ネットワークラボを作成して、実践的なネットワークコマンドを学びましょう
               </p>
@@ -931,7 +931,7 @@ ss -tulnp`}</code>
                       className={`text-xs px-2 py-0.5 rounded ${
                         node.status === 'running'
                           ? 'bg-green-500/20 text-green-500'
-                          : 'bg-gray-500/20 text-gray-500'
+                          : 'bg-muted text-muted-foreground'
                       }`}
                     >
                       {node.status}

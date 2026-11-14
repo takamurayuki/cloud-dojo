@@ -401,7 +401,7 @@ export function NoteEditor({ pageId, pageTitle }: NoteEditorProps) {
                 ol: ({ node, ...props }) => <ol className="list-decimal ml-6 mb-4" {...props} />,
                 li: ({ node, ...props }) => <li className="mb-1" {...props} />,
                 blockquote: ({ node, ...props }) => (
-                  <blockquote className="border-l-4 border-gray-300 pl-4 italic my-4" {...props} />
+                  <blockquote className="border-l-4 border-border pl-4 italic my-4" {...props} />
                 ),
                 code({ node, inline, className, children, ...props }: CodeProps) {
                   const match = /language-(\w+)/.exec(className || '');
@@ -416,7 +416,7 @@ export function NoteEditor({ pageId, pageTitle }: NoteEditorProps) {
                     </SyntaxHighlighter>
                   ) : (
                     <code
-                      className="bg-gray-800 text-green-400 px-1.5 py-0.5 rounded text-sm font-mono"
+                      className="bg-muted text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded text-sm font-mono"
                       {...props}
                     >
                       {children}

@@ -9,7 +9,7 @@ type TabsProps<T extends string> = {
 
 export const Tabs = <T extends string>({ tabs, activeTab, onChange }: TabsProps<T>) => {
   return (
-    <div className="flex items-center gap-2 border-b border-border">
+    <div role="tablist" className="flex flex-wrap items-center gap-1 border-b border-border">
       {tabs.map((tab) => (
         <TabButton
           key={tab.key}

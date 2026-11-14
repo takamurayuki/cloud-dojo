@@ -25,6 +25,7 @@ import { useState, useEffect } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import axios from 'axios';
 import { PageLayout } from '@/layouts/PageLayout';
+import { PageHeader } from '@/layouts/PageHeader';
 import { Tabs } from '@/components/ui/tabs/Tabs';
 import { TabItem } from '@/components/ui/tabs/types';
 import { NoteEditor } from '@/components/ui/notes/NoteEditor';
@@ -607,23 +608,12 @@ export function DockerCompose() {
   return (
     <PageLayout>
       {/* Header */}
-      <motion.div
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex items-center justify-between"
-      >
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl flex items-center justify-center">
-            <Layers className="w-6 h-6 text-white" />
-          </div>
-          <div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">
-              Docker Compose
-            </h1>
-            <p className="text-muted-foreground">マルチコンテナアプリケーションの定義と実行</p>
-          </div>
-        </div>
-      </motion.div>
+      <PageHeader
+        title="Docker Compose"
+        description="マルチコンテナアプリケーションの定義と実行"
+        Icon={Layers}
+        bgColor="bg-gradient-to-br from-purple-500 to-pink-500"
+      />
 
       {/* Tabs */}
       <Tabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
@@ -633,7 +623,7 @@ export function DockerCompose() {
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
           {/* What is Docker Compose */}
           <div className="bg-card rounded-2xl p-6 border border-border">
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <BookOpen className="w-5 h-5 text-blue-500" />
               Docker Composeとは？
             </h3>
@@ -684,7 +674,7 @@ export function DockerCompose() {
 
           {/* YAML Structure */}
           <div className="bg-card rounded-2xl p-6 border border-border">
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <FileCode className="w-5 h-5 text-purple-500" />
               YAMLファイルの構造
             </h3>
@@ -721,7 +711,7 @@ volumes:            # ボリューム定義
 
           {/* Common Use Cases */}
           <div className="bg-card rounded-2xl p-6 border border-border">
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <Lightbulb className="w-5 h-5 text-yellow-500" />
               よくあるユースケース
             </h3>
@@ -780,7 +770,7 @@ volumes:            # ボリューム定義
 
           {/* Key Concepts */}
           <div className="bg-card rounded-2xl p-6 border border-border">
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <Layers className="w-5 h-5 text-indigo-500" />
               重要な概念
             </h3>
@@ -817,7 +807,7 @@ volumes:            # ボリューム定義
 
           {/* Best Practices */}
           <div className="bg-card rounded-2xl p-6 border border-border">
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <AlertCircle className="w-5 h-5 text-green-500" />
               ベストプラクティス
             </h3>
@@ -870,14 +860,14 @@ volumes:            # ボリューム定義
 
           {/* Commands Reference */}
           <div className="bg-card rounded-2xl p-6 border border-border">
-            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
               <Terminal className="w-5 h-5 text-cyan-500" />
               主要コマンドリファレンス
             </h3>
             <div className="space-y-3">
               <div className="bg-secondary/50 rounded-lg p-3">
                 <div className="flex items-center justify-between mb-1">
-                  <code className="text-sm font-mono text-cyan-400">docker-compose up -d</code>
+                  <code className="text-sm font-mono text-cyan-700 dark:text-cyan-400">docker-compose up -d</code>
                   <span className="text-xs text-muted-foreground">起動</span>
                 </div>
                 <p className="text-xs text-muted-foreground">全サービスをバックグラウンドで起動</p>
@@ -885,7 +875,7 @@ volumes:            # ボリューム定義
 
               <div className="bg-secondary/50 rounded-lg p-3">
                 <div className="flex items-center justify-between mb-1">
-                  <code className="text-sm font-mono text-cyan-400">docker-compose down</code>
+                  <code className="text-sm font-mono text-cyan-700 dark:text-cyan-400">docker-compose down</code>
                   <span className="text-xs text-muted-foreground">停止</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
@@ -895,7 +885,7 @@ volumes:            # ボリューム定義
 
               <div className="bg-secondary/50 rounded-lg p-3">
                 <div className="flex items-center justify-between mb-1">
-                  <code className="text-sm font-mono text-cyan-400">docker-compose ps</code>
+                  <code className="text-sm font-mono text-cyan-700 dark:text-cyan-400">docker-compose ps</code>
                   <span className="text-xs text-muted-foreground">状態確認</span>
                 </div>
                 <p className="text-xs text-muted-foreground">実行中のサービス一覧を表示</p>
@@ -903,7 +893,7 @@ volumes:            # ボリューム定義
 
               <div className="bg-secondary/50 rounded-lg p-3">
                 <div className="flex items-center justify-between mb-1">
-                  <code className="text-sm font-mono text-cyan-400">docker-compose logs -f</code>
+                  <code className="text-sm font-mono text-cyan-700 dark:text-cyan-400">docker-compose logs -f</code>
                   <span className="text-xs text-muted-foreground">ログ表示</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
@@ -913,7 +903,7 @@ volumes:            # ボリューム定義
 
               <div className="bg-secondary/50 rounded-lg p-3">
                 <div className="flex items-center justify-between mb-1">
-                  <code className="text-sm font-mono text-cyan-400">docker-compose restart</code>
+                  <code className="text-sm font-mono text-cyan-700 dark:text-cyan-400">docker-compose restart</code>
                   <span className="text-xs text-muted-foreground">再起動</span>
                 </div>
                 <p className="text-xs text-muted-foreground">全サービスを再起動</p>
@@ -923,7 +913,7 @@ volumes:            # ボリューム定義
 
           {/* Try It Out */}
           <div className="bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-pink-500/10 border border-blue-500/20 rounded-2xl p-6">
-            <h3 className="text-xl font-bold mb-3 flex items-center gap-2">
+            <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
               <Zap className="w-5 h-5 text-yellow-500" />
               実際に試してみよう！
             </h3>
@@ -1299,7 +1289,7 @@ volumes:            # ボリューム定義
               onClick={(e) => e.stopPropagation()}
               className="bg-card border border-border rounded-2xl p-6 w-full max-w-4xl mx-4 max-h-[85vh] overflow-auto"
             >
-              <h3 className="text-2xl font-bold mb-4">Composeテンプレート</h3>
+              <h3 className="text-lg font-bold mb-4">Composeテンプレート</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {composeTemplates.map((template) => (
                   <button

@@ -3,66 +3,96 @@
 @tailwind utilities;
 
 @layer base {
+  /*
+   * 配色変数（shadcn 方式）。:root がライト、.dark がダーク。
+   * 画面側は bg-background / bg-card / text-foreground / text-muted-foreground / border-border などの
+   * 意味のある名前で使い、テーマごとの色の直書き（bg-slate-900 等）は避ける。
+   * 状態表示（成功・注意・失敗）は success / warning / danger を文字色・薄い背景（/10）・枠（/40）で使う。
+   */
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 210 40% 98%;
+    --foreground: 222.2 47.4% 11.2%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 222.2 47.4% 11.2%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover-foreground: 222.2 47.4% 11.2%;
     --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 94%;
     --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
+    --muted: 210 40% 94%;
+    --muted-foreground: 215 19% 35%;
+    --accent: 214 60% 93%;
     --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214.3 31.8% 86%;
+    --input: 214.3 31.8% 80%;
     --ring: 221.2 83.2% 53.3%;
+    --success: 142 72% 27%;
+    --success-foreground: 0 0% 100%;
+    --warning: 28 90% 32%;
+    --warning-foreground: 0 0% 100%;
+    --danger: 0 72% 42%;
+    --danger-foreground: 0 0% 100%;
     --radius: 0.75rem;
     --gradient-start: 221.2 83.2% 53.3%;
     --gradient-end: 262.1 83.3% 57.8%;
+    --mesh-alpha: 0.14;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
+    --background: 222.2 47% 6%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    --card: 222.2 40% 9.5%;
     --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
+    --popover: 222.2 40% 9.5%;
     --popover-foreground: 210 40% 98%;
     --primary: 217.2 91.2% 59.8%;
     --primary-foreground: 222.2 47.4% 11.2%;
     --secondary: 217.2 32.6% 17.5%;
     --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
+    --muted: 217.2 32.6% 15%;
+    --muted-foreground: 215 20% 72%;
+    --accent: 217.2 32.6% 19%;
     --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --destructive: 0 62.8% 45%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
+    --border: 217.2 32.6% 20%;
+    --input: 217.2 32.6% 26%;
+    --ring: 217.2 91.2% 59.8%;
+    --success: 142 69% 58%;
+    --success-foreground: 222.2 47.4% 11.2%;
+    --warning: 43 96% 62%;
+    --warning-foreground: 222.2 47.4% 11.2%;
+    --danger: 0 91% 71%;
+    --danger-foreground: 222.2 47.4% 11.2%;
     --gradient-start: 217.2 91.2% 59.8%;
     --gradient-end: 262.1 83.3% 57.8%;
+    --mesh-alpha: 0.3;
   }
 }
 
 @layer utilities {
   .glass {
-    background: rgba(255, 255, 255, 0.1);
+    background: hsl(var(--card) / 0.85);
     backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    border: 1px solid hsl(var(--border));
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
   }
 
   .dark .glass {
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: hsl(var(--card) / 0.7);
+    box-shadow: none;
+  }
+
+  /*
+   * コード・ターミナル風の表示。読みやすさと「端末の出力」であることを示すため、両テーマともダーク背景に固定する。
+   */
+  .terminal {
+    background-color: rgb(2 6 23);
+    color: rgb(241 245 249);
+    border: 1px solid rgb(30 41 59);
   }
 
   .gradient-primary {
@@ -71,10 +101,61 @@
 
   .gradient-mesh {
     background:
-      radial-gradient(at 0% 0%, hsla(221, 83%, 53%, 0.3) 0px, transparent 50%),
-      radial-gradient(at 100% 0%, hsla(262, 83%, 58%, 0.3) 0px, transparent 50%),
-      radial-gradient(at 100% 100%, hsla(221, 83%, 53%, 0.3) 0px, transparent 50%),
-      radial-gradient(at 0% 100%, hsla(262, 83%, 58%, 0.3) 0px, transparent 50%);
+      radial-gradient(at 0% 0%, hsla(221, 83%, 53%, var(--mesh-alpha)) 0px, transparent 50%),
+      radial-gradient(at 100% 0%, hsla(262, 83%, 58%, var(--mesh-alpha)) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, hsla(221, 83%, 53%, var(--mesh-alpha)) 0px, transparent 50%),
+      radial-gradient(at 0% 100%, hsla(262, 83%, 58%, var(--mesh-alpha)) 0px, transparent 50%);
+  }
+}
+
+@layer components {
+  /* 見出しの階層（全ページ共通） */
+  .page-title {
+    @apply text-3xl font-bold tracking-tight text-foreground;
+  }
+  .page-subtitle {
+    @apply text-base text-muted-foreground;
+  }
+  .section-title {
+    @apply text-xl font-semibold text-foreground;
+  }
+
+  /* ボタン。無効状態は色を落として、押せないことが両テーマで分かるようにする */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background;
+  }
+  .btn-sm {
+    @apply px-3 py-1 text-sm;
+  }
+  .btn-primary {
+    @apply bg-primary text-primary-foreground shadow-sm hover:bg-primary/90;
+  }
+  .btn-success {
+    @apply bg-emerald-600 text-white shadow-sm hover:bg-emerald-700;
+  }
+  .btn-outline {
+    @apply border border-input bg-card text-foreground hover:bg-muted;
+  }
+  .btn-warning-outline {
+    @apply border border-warning/60 bg-warning/10 text-warning hover:bg-warning/20;
+  }
+  .btn:disabled,
+  .btn[aria-disabled='true'] {
+    @apply cursor-not-allowed border border-dashed border-border bg-muted text-muted-foreground shadow-none opacity-80;
+  }
+
+  /* 入力欄 */
+  .field {
+    @apply w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-transparent;
+  }
+  .field:disabled,
+  .field[readonly] {
+    @apply cursor-not-allowed bg-muted text-muted-foreground;
+  }
+  .field[aria-invalid='true'] {
+    @apply border-danger focus-visible:ring-danger;
   }
 }
 
@@ -84,9 +165,19 @@
   }
   body {
     @apply bg-background text-foreground;
+    transition: background-color 0.2s ease, color 0.2s ease;
     font-feature-settings:
       'rlig' 1,
       'calt' 1;
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
   }
 
   ::-webkit-scrollbar {
