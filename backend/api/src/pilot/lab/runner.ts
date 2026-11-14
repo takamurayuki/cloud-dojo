@@ -19,6 +19,7 @@
  * 実際に効いている値は client-run.sh が証拠「lab-env」として記録し、整合判定はその値から期待を導く。
  */
 import Docker from 'dockerode';
+import { randomBytes } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import type { EvidenceKind } from '../curriculum/schema';
@@ -27,9 +28,22 @@ import { LAB_SYN_PREMISE } from '../evidence/parse';
 export const LAB_ID = 'n5-tcp';
 export const LABEL_LAB = 'cloud-dojo.lab';
 export const LABEL_ROLE = 'cloud-dojo.role';
+/** 実行世代のラベル（期限超過時の後始末の対象を、その操作が作ったリソースに限る） */
+export const LABEL_GEN = 'cloud-dojo.gen';
 export const LAB_IMAGE = 'cloud-dojo-lab/n5-tcp:0.1';
 const LAB_CONTEXT = fileURLToPath(new URL('../../../labs/n5-tcp', import.meta.url));
-const NETWORK_NAME = 'cloud-dojo-lab-n5-tcp';
+/** コンテナ・ネットワーク名の接頭辞。実際の名前は `${NAME_PREFIX}-<世代>`（ネットワーク）、`${NAME_PREFIX}-<世代>-<role>`（コンテナ） */
+export const NAME_PREFIX = 'cloud-dojo-lab-n5-tcp';
+
+/** プロセスごとの識別子＋連番で世代を採番する（再起動後に前のプロセスの世代と衝突しない） */
+const PROCESS_TOKEN = randomBytes(3).toString('hex');
+let generationSeq = 0;
+export function nextGeneration(): string {
+  generationSeq += 1;
+  return `${PROCESS_TOKEN}g${generationSeq}`;
+}
+const networkName = (gen: string) => `${NAME_PREFIX}-${gen}`;
+const containerName = (gen: string, role: string) => `${NAME_PREFIX}-${gen}-${role}`;
 const ROLES = ['client', 'server'] as const;
 type Role = (typeof ROLES)[number];
 
@@ -95,18 +109,37 @@ export class LabUnavailableError extends Error {
 }
 
 export interface CleanupResult {
-  /** 停止・削除が全て成功したか */
+  /** 後始末（走っていた単位の終了を含む）が実際に完了し、停止・削除が全て成功したか */
   ok: boolean;
   stoppedContainers: number;
   removedContainers: number;
   removedNetworks: number;
   errors: string[];
+  /** 期限内に完了せず、まだ続いている（完了するまで新しいラボ操作は 409）。完了していれば付かない */
+  pending?: true;
+}
+
+/** 期限超過の後始末が続いている間の状態 */
+export interface LabCleanupState {
+  generation: string;
+  operation: string;
+  since: string;
+}
+
+export class LabCleanupPendingError extends Error {
+  readonly code = 'LAB_CLEANUP_PENDING';
+  constructor(readonly state: LabCleanupState) {
+    super(`前の操作（${state.operation}）の後始末がまだ終わっていないため、ラボを操作できません`);
+    this.name = 'LabCleanupPendingError';
+  }
 }
 
 export class LabTimeoutError extends Error {
   readonly code = 'LAB_TIMEOUT';
-  /** 期限超過時に行った後始末の結果（後始末をしない操作では null） */
+  /** 期限超過時に行った後始末の結果（後始末をしない操作では null）。応答時点の値 */
   cleanup: CleanupResult | null = null;
+  /** 後始末が実際に完了したときの結果（応答後も続く場合の追跡用。応答には含めない） */
+  cleanupDone: Promise<CleanupResult> | null = null;
   constructor(
     readonly operation: string,
     /** 期限を超えた単位（全体の期限なら '<operation>（全体）'） */
@@ -140,6 +173,8 @@ export interface LabStatus {
 }
 
 export interface LabRunner {
+  /** 期限超過の後始末が続いていればその状態（無ければ null）。続いている間は start／reset／collect を受け付けない */
+  cleanupState?(): LabCleanupState | null;
   status(): Promise<LabStatus>;
   start(): Promise<LabStatus & { elapsedMs: number }>;
   reset(): Promise<{ removedContainers: number; removedNetworks: number; elapsedMs: number }>;
@@ -225,6 +260,8 @@ class OpBudget {
   constructor(
     readonly operation: string,
     private readonly totalMs: number,
+    /** この操作の実行世代（作るリソースに付け、後始末の対象をこれに限る） */
+    readonly generation: string,
   ) {
     this.endAt = Date.now() + totalMs;
   }
@@ -267,6 +304,7 @@ class OpBudget {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const emptyCleanup = (): CleanupResult => ({ ok: false, stoppedContainers: 0, removedContainers: 0, removedNetworks: 0, errors: [] });
 
 const SERVER_APPLY: Record<string, string> = {
   open: 'nohup python3 /lab/server.py >/tmp/server.log 2>&1 & sleep 0.5',
@@ -283,28 +321,86 @@ export class DockerLabRunner implements LabRunner {
     this.limits = { ...DEFAULT_LAB_LIMITS, ...limits };
   }
 
+  private settling: LabCleanupState | null = null;
+
+  /** 期限超過の後始末が続いていればその状態 */
+  cleanupState(): LabCleanupState | null {
+    return this.settling ? { ...this.settling } : null;
+  }
+
+  private assertNotSettling() {
+    if (this.settling) throw new LabCleanupPendingError({ ...this.settling });
+  }
+
   /**
-   * 操作全体を時間予算の下で実行する。期限超過（LabTimeoutError）なら、走っている単位の終了を猶予だけ待ち、
-   * cleanupOnTimeout のときはラベル付きコンテナの停止・削除まで行って結果を error.cleanup に入れる。
+   * 操作全体を時間予算の下で実行する。期限超過（LabTimeoutError）で cleanupOnTimeout のときは、
+   * その操作の世代のリソースの後始末を始め、「後始末中」の状態にする。後始末は応答の期限
+   * （abortGraceMs＋cleanupMs）を過ぎても続け、実際に完了した時点で状態を解除する。
+   * error.cleanup は応答時点の結果（未完了なら ok=false・pending=true）、error.cleanupDone は完了時の結果。
    */
   private async guarded<T>(operation: string, totalMs: number, cleanupOnTimeout: boolean, fn: (b: OpBudget) => Promise<T>): Promise<T> {
-    const b = new OpBudget(operation, totalMs);
+    if (cleanupOnTimeout) this.assertNotSettling();
+    const b = new OpBudget(operation, totalMs, nextGeneration());
     try {
       return await fn(b);
     } catch (e) {
       if (e instanceof LabTimeoutError && cleanupOnTimeout) {
-        if (b.inflight) await Promise.race([b.inflight.catch(() => undefined), sleep(this.limits.abortGraceMs)]);
-        e.cleanup = await this.cleanup();
+        const r = emptyCleanup();
+        const state: LabCleanupState = { generation: b.generation, operation, since: new Date().toISOString() };
+        this.settling = state;
+        const done = this.settleTimedOut(b, r).finally(() => {
+          if (this.settling === state) this.settling = null;
+        });
+        const answered = await Promise.race([done, sleep(this.limits.abortGraceMs + this.limits.cleanupMs).then(() => null)]);
+        e.cleanup = answered ?? {
+          ...r,
+          errors: [...r.errors, `後始末が ${this.limits.abortGraceMs + this.limits.cleanupMs}ms 以内に完了していない（継続中。完了するまで新しいラボ操作は受け付けない）`],
+          ok: false,
+          pending: true,
+        };
+        e.cleanupDone = done;
       }
       throw e;
     }
   }
 
-  /** 期限超過時の後始末：ラベル付きコンテナを停止して削除し、ラベル付きネットワークを削除する */
-  async cleanup(): Promise<CleanupResult> {
-    const r: CleanupResult = { ok: false, stoppedContainers: 0, removedContainers: 0, removedNetworks: 0, errors: [] };
-    const work = (async () => {
-      const containers = await this.labContainers();
+  /**
+   * 期限超過した操作の後始末を、実際に完了するまで行う（拒否しない Promise）。
+   * 1. 走っていた単位の終了を猶予だけ待つ。2. その世代のリソースを停止・削除する。
+   * 3. 走っていた単位の実際の終了を待つ（期限なし）。4. 1 の時点で単位が終わっていなかったなら、
+   *    その後に作られた可能性があるため、同じ世代のリソースをもう一度片付ける。
+   */
+  private async settleTimedOut(b: OpBudget, r: CleanupResult): Promise<CleanupResult> {
+    let inflightDone = !b.inflight;
+    const inflight = b.inflight
+      ? b.inflight.then(
+          () => undefined,
+          () => undefined,
+        ).then(() => {
+          inflightDone = true;
+        })
+      : Promise.resolve();
+    await Promise.race([inflight, sleep(this.limits.abortGraceMs)]);
+    const settledBeforeFirstPass = inflightDone;
+    await this.cleanupGeneration(b.generation, r);
+    await inflight;
+    if (!settledBeforeFirstPass) await this.cleanupGeneration(b.generation, r);
+    r.ok = r.errors.length === 0;
+    return r;
+  }
+
+  /**
+   * 指定した世代のコンテナを停止・削除し、その世代のネットワークを削除する（結果は r に足す。拒否しない）。
+   * 一覧は世代ラベルで絞り込み、さらに各要素のラベルと名前の接頭辞を確かめる（一覧が他の世代を含んでも触れない）。
+   * ネットワークの一覧は、コンテナの処理が終わってから取得するが、同じ検査を通すので別世代のものは対象にならない。
+   */
+  async cleanupGeneration(gen: string, r: CleanupResult = emptyCleanup()): Promise<CleanupResult> {
+    const filters = { label: [`${LABEL_LAB}=${LAB_ID}`, `${LABEL_GEN}=${gen}`] };
+    const cPrefix = `/${containerName(gen, '')}`;
+    try {
+      const containers = (await this.docker.listContainers({ all: true, filters })).filter(
+        (c) => c.Labels?.[LABEL_LAB] === LAB_ID && c.Labels?.[LABEL_GEN] === gen && (c.Names ?? []).some((n) => n.startsWith(cPrefix)),
+      );
       for (const c of containers) {
         const handle = this.docker.getContainer(c.Id);
         try {
@@ -321,30 +417,28 @@ export class DockerLabRunner implements LabRunner {
           await handle.remove({ force: true });
           r.removedContainers++;
         } catch (e) {
+          if ((e as { statusCode?: number }).statusCode === 404) continue; // 既に無い
           r.errors.push(`remove ${c.Id.slice(0, 12)}: ${(e as Error).message}`);
         }
       }
-      for (const n of await this.labNetworks()) {
+    } catch (e) {
+      r.errors.push(`list containers: ${(e as Error).message}`);
+    }
+    try {
+      const networks = (await this.docker.listNetworks({ filters })).filter(
+        (n) => n.Labels?.[LABEL_LAB] === LAB_ID && n.Labels?.[LABEL_GEN] === gen && n.Name === networkName(gen),
+      );
+      for (const n of networks) {
         try {
           await this.docker.getNetwork(n.Id).remove();
           r.removedNetworks++;
         } catch (e) {
+          if ((e as { statusCode?: number }).statusCode === 404) continue;
           r.errors.push(`remove network ${n.Name}: ${(e as Error).message}`);
         }
       }
-    })();
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      await Promise.race([
-        work,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`後始末が ${this.limits.cleanupMs}ms を超えた`)), this.limits.cleanupMs);
-        }),
-      ]);
     } catch (e) {
-      r.errors.push((e as Error).message);
-    } finally {
-      clearTimeout(timer);
+      r.errors.push(`list networks: ${(e as Error).message}`);
     }
     r.ok = r.errors.length === 0;
     return r;
@@ -426,14 +520,16 @@ export class DockerLabRunner implements LabRunner {
     );
   }
 
-  private containerSpec(role: Role, netName: string, withOptionalSysctl: boolean): Docker.ContainerCreateOptions {
+  private containerSpec(role: Role, netName: string, withOptionalSysctl: boolean, gen: string, attempt = 0): Docker.ContainerCreateOptions {
     const sysctls = role === 'client' ? { ...CLIENT_SYSCTLS } : undefined;
     if (sysctls && !withOptionalSysctl) delete sysctls[OPTIONAL_SYSCTL];
     return {
+      // 名前は世代入り（作り直しでは名前の衝突を避けるため末尾に番号を足す）
+      name: attempt === 0 ? containerName(gen, role) : `${containerName(gen, role)}-${attempt}`,
       Image: LAB_IMAGE,
       Cmd: ['sleep', 'infinity'],
       Hostname: role,
-      Labels: { [LABEL_LAB]: LAB_ID, [LABEL_ROLE]: role },
+      Labels: { [LABEL_LAB]: LAB_ID, [LABEL_ROLE]: role, [LABEL_GEN]: gen },
       HostConfig: {
         NetworkMode: netName,
         CapAdd: ['NET_ADMIN', 'NET_RAW'],
@@ -448,7 +544,7 @@ export class DockerLabRunner implements LabRunner {
   private async createAndStart(b: OpBudget, role: Role, netName: string) {
     try {
       b.check();
-      const c = await this.docker.createContainer(this.containerSpec(role, netName, true));
+      const c = await this.docker.createContainer(this.containerSpec(role, netName, true, b.generation));
       try {
         b.check();
         await c.start();
@@ -461,7 +557,7 @@ export class DockerLabRunner implements LabRunner {
       // （エラー文は "net.ipv4.tcp_syn_linear_timeouts" 形式と "/proc/sys/net/ipv4/tcp_syn_linear_timeouts" 形式がある）
       if (role !== 'client' || !String((e as Error).message).includes(OPTIONAL_SYSCTL.split('.').at(-1)!)) throw e;
       b.check();
-      const c = await this.docker.createContainer(this.containerSpec(role, netName, false));
+      const c = await this.docker.createContainer(this.containerSpec(role, netName, false, b.generation, 1));
       b.check();
       await c.start();
     }
@@ -474,7 +570,12 @@ export class DockerLabRunner implements LabRunner {
       let net = (await this.labNetworks())[0];
       if (!net) {
         b.check();
-        await this.docker.createNetwork({ Name: NETWORK_NAME, Driver: 'bridge', Internal: true, Labels: { [LABEL_LAB]: LAB_ID } });
+        await this.docker.createNetwork({
+          Name: networkName(b.generation),
+          Driver: 'bridge',
+          Internal: true,
+          Labels: { [LABEL_LAB]: LAB_ID, [LABEL_GEN]: b.generation },
+        });
         net = (await this.labNetworks())[0];
       }
       const existing = await this.labContainers();

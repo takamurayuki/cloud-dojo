@@ -1,5 +1,6 @@
 import Docker from 'dockerode';
 import { EventEmitter } from 'events';
+import { resolveUnprotectedContainer } from '../pilot/lab/protect';
 
 const docker = new Docker();
 
@@ -217,8 +218,9 @@ export class DockerService extends EventEmitter {
     }));
   }
 
+  // 削除・停止・起動は、パイロットのラボコンテナ（ラベル cloud-dojo.lab）なら PilotLabProtectedError で拒否する
   async removeContainer(containerId: string, force: boolean = false): Promise<void> {
-    const container = docker.getContainer(containerId);
+    const container = await resolveUnprotectedContainer(docker, containerId);
     await container.remove({ force });
   }
 
@@ -228,12 +230,12 @@ export class DockerService extends EventEmitter {
   }
 
   async stopContainer(containerId: string): Promise<void> {
-    const container = docker.getContainer(containerId);
+    const container = await resolveUnprotectedContainer(docker, containerId);
     await container.stop();
   }
 
   async startContainer(containerId: string): Promise<void> {
-    const container = docker.getContainer(containerId);
+    const container = await resolveUnprotectedContainer(docker, containerId);
     await container.start();
   }
 

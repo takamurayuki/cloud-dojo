@@ -3,6 +3,7 @@ import { z } from 'zod';
 import Docker from 'dockerode';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { PilotLabProtectedError, protectedBody, resolveUnprotectedContainer } from '../pilot/lab/protect';
 
 const execAsync = promisify(exec);
 const docker = new Docker();
@@ -256,7 +257,8 @@ export async function networkRoutes(fastify: FastifyInstance) {
       const body = execCommandSchema.parse(request.body);
       const { containerId, command } = body;
 
-      const container = docker.getContainer(containerId);
+      // パイロットのラボコンテナ（ラベル cloud-dojo.lab）には実行させない。以後は確かめた ID で操作する
+      const container = await resolveUnprotectedContainer(docker, containerId);
 
       const exec = await container.exec({
         Cmd: ['/bin/sh', '-c', command],
@@ -284,6 +286,7 @@ export async function networkRoutes(fastify: FastifyInstance) {
         output: output.trim(),
       };
     } catch (error) {
+      if (error instanceof PilotLabProtectedError) return reply.code(403).send(protectedBody(error));
       fastify.log.error({ error }, 'Failed to execute command');
       return reply.code(500).send({
         error: 'Failed to execute command',

@@ -110,6 +110,8 @@ export interface LabStatus {
   network: { name: string; internal: boolean } | null;
   /** ラボを使用中の操作（なければ null） */
   busy?: { owner: string; since: string } | null;
+  /** 期限超過した操作の後始末が続いている間の状態（無ければ null） */
+  cleanupPending?: { generation: string; operation: string; since: string } | null;
 }
 
 export class ApiError extends Error {
@@ -145,12 +147,15 @@ interface CleanupResult {
   removedContainers: number;
   removedNetworks: number;
   errors: string[];
+  /** 後始末が期限内に終わらず続いている（終わるまでラボ操作は 409 LAB_CLEANUP_PENDING） */
+  pending?: true;
 }
 
 /** ラボ操作の期限超過（LAB_TIMEOUT）時に行われた後始末の結果を表示用の文にする */
 function cleanupHint(c: CleanupResult | null | undefined): string | undefined {
   if (!c) return undefined;
   const counts = `停止 ${c.stoppedContainers}・削除 ${c.removedContainers} コンテナ、ネットワーク削除 ${c.removedNetworks}`;
+  if (c.pending) return `ラボの後始末が期限内に終わらず、まだ続いています（ここまで：${counts}）。終わるまでラボの操作はできません。しばらく待ってから再試行してください。`;
   return c.ok ? `ラボのコンテナを停止・削除しました（${counts}）。` : `ラボの後始末に失敗した箇所があります（${counts}）：${c.errors.join(' / ')}`;
 }
 

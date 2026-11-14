@@ -12,7 +12,7 @@ import { deriveCondition, describeCondition, newSeed } from './conditions';
 import { fixtureEvidence } from './evidence/fixtures';
 import { attemptCompletion, evaluateAttempt, unitCompletion, type Reflection } from './judge';
 import { LabLock, sharedLabLock } from './lab/lock';
-import { LabTimeoutError, LabUnavailableError, type LabRunner } from './lab/runner';
+import { LabCleanupPendingError, LabTimeoutError, LabUnavailableError, type LabCleanupState, type LabRunner } from './lab/runner';
 import type { AttemptRow, PilotStore } from './store';
 
 export interface PilotDeps {
@@ -61,6 +61,14 @@ function labTimedOut(reply: FastifyReply, e: LabTimeoutError) {
     limitMs: e.limitMs,
     // 期限超過時に行ったラボの停止・削除の結果（成否と内訳）
     cleanup: e.cleanup,
+  });
+}
+
+function labCleanupPending(reply: FastifyReply, state: LabCleanupState) {
+  return reply.status(409).send({
+    error: 'LAB_CLEANUP_PENDING',
+    message: '前のラボ操作が期限を超え、その後始末がまだ終わっていません。終わってから再試行してください',
+    cleanup: state,
   });
 }
 
@@ -212,6 +220,12 @@ export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
       texts = fixtureEvidence(cond.portState, Number(cond.connectTimeout));
       origin = 'fixture';
     } else {
+      // 期限超過した前の操作の後始末が続いている間は、ラボを触らない（後始末が実際に終わるまで 409）
+      const pending = lab.cleanupState?.() ?? null;
+      if (pending) {
+        store.releaseRun(a.id);
+        return labCleanupPending(reply, pending);
+      }
       // ラボ操作全体（リセット・起動・条件適用・接続・証拠収集）を単一の排他区間で行う
       const release = labLock.tryAcquire(`run:${a.id}`);
       if (!release) {
@@ -224,6 +238,7 @@ export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
       } catch (e) {
         store.releaseRun(a.id);
         if (e instanceof LabUnavailableError) return dockerMissing(reply, e);
+        if (e instanceof LabCleanupPendingError) return labCleanupPending(reply, e.state);
         req.log.error(e);
         if (e instanceof LabTimeoutError) return labTimedOut(reply, e);
         return reply.status(500).send({ error: 'LAB_ERROR', message: (e as Error).message });
@@ -281,11 +296,14 @@ export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
     } catch (e) {
       if (e instanceof LabUnavailableError) return dockerMissing(reply, e);
       if (e instanceof LabTimeoutError) return labTimedOut(reply, e);
+      if (e instanceof LabCleanupPendingError) return labCleanupPending(reply, e.state);
       return reply.status(500).send({ error: 'LAB_ERROR', message: (e as Error).message });
     }
   };
-  /** ラボを変更する操作は排他区間で行う。使用中なら 409 LAB_BUSY */
+  /** ラボを変更する操作は排他区間で行う。使用中なら 409 LAB_BUSY、前の操作の後始末中なら 409 LAB_CLEANUP_PENDING */
   const exclusiveLabCall = async (owner: string, reply: FastifyReply, fn: () => Promise<unknown>) => {
+    const pending = lab.cleanupState?.() ?? null;
+    if (pending) return labCleanupPending(reply, pending);
     const release = labLock.tryAcquire(owner);
     if (!release) return labBusy(reply, labLock);
     try {
@@ -294,8 +312,10 @@ export async function pilotRoutes(fastify: FastifyInstance, opts: PilotDeps) {
       release();
     }
   };
-  // status は読み取りのみなので排他しない（使用中なら保持者も返す）
-  fastify.get('/lab/status', async (_req, reply) => labCall(reply, async () => ({ ...(await lab.status()), busy: labLock.current() })));
+  // status は読み取りのみなので排他しない（使用中なら保持者、後始末中ならその状態も返す）
+  fastify.get('/lab/status', async (_req, reply) =>
+    labCall(reply, async () => ({ ...(await lab.status()), busy: labLock.current(), cleanupPending: lab.cleanupState?.() ?? null })),
+  );
   fastify.post('/lab/start', async (_req, reply) => exclusiveLabCall('lab/start', reply, () => lab.start()));
   fastify.post('/lab/reset', async (_req, reply) => exclusiveLabCall('lab/reset', reply, () => lab.reset()));
 }

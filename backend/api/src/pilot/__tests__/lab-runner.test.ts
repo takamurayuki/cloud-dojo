@@ -7,108 +7,11 @@
 import { PassThrough } from 'node:stream';
 import type Docker from 'dockerode';
 import { describe, expect, it } from 'vitest';
-import { fixtureEvidence } from '../evidence/fixtures';
 import { CLIENT_SYSCTLS, consumeBuildStream, DockerLabRunner, LabOutputLimitError, LabTimeoutError, LABEL_LAB, LABEL_ROLE, LAB_ID } from '../lab/runner';
 
-interface FakeContainer {
-  Id: string;
-  Labels: Record<string, string>;
-  State: string;
-  spec: Docker.ContainerCreateOptions;
-}
-
-interface FakeOpts {
-  /** この exec（コマンド先頭）で応答が返らない */
-  hangExec?: string;
-  /** createContainer が返らない */
-  hangCreate?: boolean;
-  /** remove が失敗する */
-  removeFails?: boolean;
-  /** start 時に投げるエラー（spec を見て決める） */
-  startError?: (spec: Docker.ContainerCreateOptions) => Error | null;
-}
+import { fakeDocker } from './fake-docker';
 
 const never = () => new Promise<never>(() => undefined);
-
-function fakeDocker(opts: FakeOpts = {}) {
-  const calls = { stop: [] as string[], remove: [] as string[], removeNetwork: [] as string[], created: [] as Docker.ContainerCreateOptions[], execStreamsDestroyed: 0 };
-  const containers = new Map<string, FakeContainer>();
-  const networks = new Map<string, { Id: string; Name: string; Internal: boolean; Labels: Record<string, string> }>();
-  let seq = 0;
-  const matches = (labels: Record<string, string>, filters?: { label?: string[] }) =>
-    (filters?.label ?? []).every((f) => {
-      const [k, v] = f.split('=');
-      return labels[k] === v;
-    });
-  const evidence = fixtureEvidence('drop', 5);
-  const outputFor = (cmd: string[]) => {
-    if (cmd[0] === '/lab/client-run.sh') {
-      return ['=====lab-env', evidence['lab-env'], '=====tcpdump', evidence.tcpdump, '=====ss-client', evidence['ss-client'], '=====curl', evidence.curl, ''].join('\n');
-    }
-    if (cmd[0] === 'ss') return evidence['ss-server'];
-    return '';
-  };
-  const handle = (id: string) => ({
-    id,
-    start: async () => {
-      const c = containers.get(id)!;
-      const err = opts.startError?.(c.spec);
-      if (err) throw err;
-      c.State = 'running';
-    },
-    stop: async () => {
-      calls.stop.push(id);
-      const c = containers.get(id);
-      if (c) c.State = 'exited';
-    },
-    remove: async () => {
-      calls.remove.push(id);
-      if (opts.removeFails) throw new Error('remove failed (stub)');
-      containers.delete(id);
-    },
-    exec: async ({ Cmd }: { Cmd: string[] }) => ({
-      start: async () => {
-        const s = new PassThrough();
-        s.on('close', () => {
-          if (!s.writableEnded) calls.execStreamsDestroyed++;
-        });
-        if (opts.hangExec !== Cmd[0]) setImmediate(() => s.end(outputFor(Cmd)));
-        return s;
-      },
-      inspect: async () => ({ ExitCode: 0 }),
-    }),
-  });
-  const docker = {
-    ping: async () => 'OK',
-    getImage: () => ({ inspect: async () => ({ Id: 'img' }) }),
-    buildImage: async () => {
-      throw new Error('not expected');
-    },
-    listNetworks: async ({ filters }: { filters?: { label?: string[] } } = {}) => [...networks.values()].filter((n) => matches(n.Labels, filters)),
-    createNetwork: async (o: { Name: string; Internal: boolean; Labels: Record<string, string> }) => {
-      const Id = `net${++seq}`;
-      networks.set(Id, { Id, Name: o.Name, Internal: o.Internal, Labels: o.Labels });
-    },
-    listContainers: async ({ all, filters }: { all?: boolean; filters?: { label?: string[] } } = {}) =>
-      [...containers.values()].filter((c) => matches(c.Labels, filters) && (all || c.State === 'running')),
-    createContainer: async (spec: Docker.ContainerCreateOptions) => {
-      if (opts.hangCreate) return never();
-      const Id = `c${++seq}`;
-      containers.set(Id, { Id, Labels: spec.Labels as Record<string, string>, State: 'created', spec });
-      calls.created.push(spec);
-      return handle(Id);
-    },
-    getContainer: (id: string) => handle(id),
-    getNetwork: (id: string) => ({
-      remove: async () => {
-        calls.removeNetwork.push(id);
-        networks.delete(id);
-      },
-    }),
-    modem: { demuxStream: (s: PassThrough, out: PassThrough) => s.pipe(out) },
-  };
-  return { docker: docker as unknown as Docker, calls, containers };
-}
 
 const FAST = { execMs: 80, startMs: 80, resetMs: 500, abortGraceMs: 20, cleanupMs: 1_000 };
 const cond = { portState: 'drop', connectTimeout: '5' };
@@ -157,16 +60,20 @@ describe('ラボ処理の期限（スタブ）', () => {
     expect(e.cleanup?.errors.some((m) => m.includes('remove failed'))).toBe(true);
   });
 
-  it('起動（コンテナ作成）が期限を超えても、後始末が呼ばれる', async () => {
+  it('起動（コンテナ作成）が期限を超えても、後始末が呼ばれる。作成が返らないままなら後始末は未完了（ok=false）', async () => {
+    // 直し回2：作成の要求が Docker から返らない間は、後で作られる可能性が残るため後始末は完了扱いにしない
+    // （直し回1では ok=true を期待していたが、再レビューで「未完了でも ok=true になり得る」と指摘された箇所）
     const { docker } = fakeDocker({ hangCreate: true });
     const runner = new DockerLabRunner(docker, FAST);
     const e = (await runner.start().catch((x: unknown) => x)) as LabTimeoutError;
     expect(e).toBeInstanceOf(LabTimeoutError);
     expect(e.step).toBe('start');
     expect(e.cleanup).not.toBeNull();
-    expect(e.cleanup?.ok).toBe(true);
-    // 作成済みのネットワークも片付けられる
+    expect(e.cleanup?.ok).toBe(false);
+    expect(e.cleanup?.pending).toBe(true);
+    // 作成済みのネットワークは片付けられる
     expect(e.cleanup?.removedNetworks).toBe(1);
+    expect(runner.cleanupState()?.operation).toBe('start');
   });
 
   it('操作全体の期限は、単位の期限より短ければそちらで打ち切る', async () => {

@@ -27,7 +27,19 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   証拠一式と評価は収集完了後に1トランザクションで保存する（途中失敗では何も残らず、同じ試行で再実行できる）。
 - **期限と上限**：start／reset／collect の全体と、ping・ビルド・起動・リセット・exec の各単位に期限がある
   （`lab/runner.ts` の `DEFAULT_LAB_LIMITS`）。ビルド進捗は 2MB、exec 出力は 256KB まで。期限を超えたら
-  ラベル付きコンテナを停止・削除し、504 `LAB_TIMEOUT` の `cleanup` に後始末の成否を返す。
+  その操作の世代のコンテナを停止・削除し、504 `LAB_TIMEOUT` の `cleanup` に後始末の成否を返す。
+- **実行世代と後始末中の状態**：start／reset／collect は開始時に世代を採番し、作るコンテナ・ネットワークに
+  ラベル `cloud-dojo.gen` と世代入りの名前（`cloud-dojo-lab-n5-tcp-<世代>`…）を付ける。期限超過時の後始末は、
+  その世代のラベルを持ち、かつ名前がその世代の接頭辞で始まるものだけを対象にする（遅れて走っても別の世代には触れない）。
+  後始末は応答の期限（`abortGraceMs`＋`cleanupMs`）を過ぎても、走っていた単位と後始末が実際に終わるまで続く。
+  その間は「後始末中」で、run・lab/start・lab/reset は 409 `LAB_CLEANUP_PENDING`（`lab/status` の `cleanupPending` で確認できる）。
+  `cleanup.ok` は期限内に実際に完了し失敗が無いときだけ true で、未完了なら `ok=false`・`pending=true`。
+  Docker が応答を返さないままなら後始末中は解除されない。その場合は API プロセスを再起動する（再起動後の最初の
+  run・lab/reset が、前のプロセスのものを含むラベル付きのラボを全て削除する）。
+- **既存 API との併用**：既存サーバ（`pnpm dev:api`）はパイロットと既存 API を同時に登録する。既存 API のうち
+  `POST /api/network/exec` と `DELETE /api/docker/containers/:id`・`POST /api/docker/containers/:id/stop`・`start` は、
+  対象がラベル `cloud-dojo.lab` を持つコンテナなら 403 `PILOT_LAB_PROTECTED` で拒否する（`lab/protect.ts`。判定はラベルだけで、
+  通常のコンテナは従来どおり）。ログの取得（読み取り）は拒否しない。Docker を直接操作（docker CLI 等）した場合の干渉は防げない。
 
 - Node 22.5 以上が必要（`node:sqlite` を使う）。保存先の既定は `backend/api/.data/pilot.sqlite`（git 管理外）。
 - 既定ポートは既存 API と同じ 4000 なので、既存 API（`pnpm dev:api`）とは同時に起動しない。既存 API を起動した場合も `/api/pilot` に同じ経路が登録される（node:sqlite が無い Node ではパイロット経路だけ無効化し、既存機能は止めない）。
@@ -47,6 +59,7 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
 | `store.ts` | SQLite 保存（attempts / evidence / evaluations / reflections） |
 | `lab/runner.ts` | dockerode ラボランナー（ラベル付きコンテナのみ操作、期限・上限・後始末） |
 | `lab/lock.ts` | ラボ操作の排他区間（プロセス内） |
+| `lab/protect.ts` | 既存のコンテナ操作 API からラボコンテナ（ラベル `cloud-dojo.lab`）を守る判定 |
 | `routes.ts` | API（`/api/pilot/...`、127.0.0.1 のみ） |
 
 ## テスト

@@ -54,6 +54,7 @@ const ERROR_TITLES: Record<string, string> = {
   DOCKER_NOT_FOUND: 'Docker 未検出',
   LAB_BUSY: 'ラボは使用中',
   LAB_TIMEOUT: 'ラボ操作が期限を超えた',
+  LAB_CLEANUP_PENDING: 'ラボの後始末中',
   RUN_IN_PROGRESS: 'この試行は実行中',
 };
 
@@ -181,7 +182,7 @@ export function UnitPage() {
     );
   }
 
-  const isLabError = error !== null && ['DOCKER_NOT_FOUND', 'LAB_ERROR', 'LAB_BUSY', 'LAB_TIMEOUT'].includes(error.code);
+  const isLabError = error !== null && ['DOCKER_NOT_FOUND', 'LAB_ERROR', 'LAB_BUSY', 'LAB_TIMEOUT', 'LAB_CLEANUP_PENDING'].includes(error.code);
   const fieldsComplete = unit.prediction.fields.every((f) => answers[f.id]);
   const locked = attempt?.predictionLocked ?? false;
   const evaluation = attempt?.evaluation ?? null;
