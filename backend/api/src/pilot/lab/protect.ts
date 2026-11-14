@@ -11,7 +11,7 @@
  * 通常サーバはパイロットと既存 API を同じプロセスに登録するため、既存 API が任意のコンテナ ID を受け取ると、
  * パイロットの排他（lock.ts）を通らずにラボのコンテナで sysctl を変えたり証拠ファイルを書き換えたり、
  * 実行中のラボを止めたりできてしまう。そこで、操作の前にコンテナを inspect し、ラベル cloud-dojo.lab を
- * 持つものは拒否する。判定はラベルだけで行うので、ラベルの無い通常のコンテナの扱いは変わらない。
+ * 持つものは拒否する（加えて、下の直し回6 必須2 のとおり Docker ソケットを保有するコンテナも拒否する）。
  *
  * 直し回6（必須2）：Docker ソケットをマウントしているコンテナ（例：リポジトリの docker-compose.yml の cloud-dojo-worker）は、
  * ラベルの有無によらず、実行（exec）・削除・停止・起動を拒否する（DockerSocketContainerProtectedError、403）。
@@ -19,6 +19,8 @@
  * 判定は inspect（一覧の場合は listContainers）の Mounts の Source に対して行い、基準は compose 定義の検査
  * （services/compose-guard.ts の dockerSocketReason：既知のソケット・別名・リンク・ハードリンク・親ディレクトリ・
  * 名前 docker.sock・名前付きパイプ・`\` を含むパス）と同じにする。ソケットを持たない通常のコンテナの扱いは変わらない。
+ * 直し回7（必須1）：Source は書き換えずに（trim 等をせずに）共有関数 dockerSocketReason へ渡す。前後の空白・`\`・制御文字を
+ * 含む Source は判定不能として、ソケットを保有するものと同じに保護する。
  *
  * 名前で指定された場合、inspect の後に同じ名前が別のコンテナに付け替えられても対象がずれないよう、
  * 以後の操作は inspect で確かめた完全な ID に対して行う（resolveUnprotectedContainer の戻り値を使う）。

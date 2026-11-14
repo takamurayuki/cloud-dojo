@@ -47,10 +47,21 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
      同じ削除のあとに実測用のラボを新しく起動して実測する（実測後もそのラボは起動したまま残る）。
      画面では、この手順を「復旧手順」として開いて読める（ラボ欄の後始末中の表示と、409／504 のエラー表示）。
   3. それでも残る場合は Docker 自体を確認する（`docker ps -a --filter label=cloud-dojo.lab`、`docker network ls --filter label=cloud-dojo.lab`）。
-- **既存 API との併用**：既存サーバ（`pnpm dev:api`）はパイロットと既存 API を同時に登録する。既存 API のうちコンテナ・
-  ネットワークを実行・停止・削除する経路は、対象がラベル `cloud-dojo.lab` を持てば 403 `PILOT_LAB_PROTECTED` で拒否する
-  （`lab/protect.ts`。判定はラベルだけで、通常のリソースは従来どおり。名前・短縮 ID の指定も inspect で解決してから判定し、
-  以後は確かめた完全な ID で操作する）：
+- **既存 API との併用**：既存サーバ（`pnpm dev:api`）はパイロットと既存 API を同時に登録する。既存 API がホストやラボに
+  届かないよう、保護は次の3つを組み合わせる（いずれも名前・短縮 ID の指定は inspect で解決してから判定し、以後は確かめた
+  完全な ID で操作する）：
+  1. **ラボのラベル**：コンテナ・ネットワークを実行・停止・削除する経路は、対象がラベル `cloud-dojo.lab` を持てば
+     403 `PILOT_LAB_PROTECTED` で拒否する（`lab/protect.ts`）
+  2. **Docker ソケットを保有するコンテナ**：ラベルの有無によらず、inspect（一覧では listContainers）の `Mounts[].Source` が
+     Docker ソケット（またはそれを含む親ディレクトリ・別名・リンク）を指すコンテナは、実行・削除・停止・起動を
+     403 `DOCKER_SOCKET_CONTAINER_PROTECTED` で拒否する（例：リポジトリの `docker-compose.yml` の `cloud-dojo-worker`。
+     中からソケットへ要求を送ればホストの全コンテナを操作できるため）。compose の up・down でも同じに拒否する
+  3. **定義・マニフェストの検証**：compose の定義と Kubernetes のマニフェストは、ホストを操作できる設定を含めば適用前に拒否する（下記）
+  パスの判定（compose の bind、既存コンテナの `Mounts[].Source`、Kubernetes の `hostPath.path`）は、どれも同じ共有関数
+  （`services/compose-guard.ts` の `dockerSocketReason`）で行う。検査には実際に Docker・kubelet へ渡す文字列そのものを使い、
+  書き換え（trim 等）はしない。前後の空白・`\`・制御文字を含むパスや空のパスは、解釈を一致させられないため判定不能として
+  拒否する（既存コンテナでは保護対象にする）。ラベルもソケットも持たない通常のリソースは従来どおり操作できる。
+  対象の経路：
   - `POST /api/network/exec`、`DELETE /api/docker/containers/:id`、`POST /api/docker/containers/:id/stop`・`start`
   - `POST /api/network/lab/create`（固定名 `network-node-<i>` の既存コンテナ削除。何も作らないうちに拒否する）。
     指定した名前のネットワークが既にあれば、名前の完全一致とラベル `cloud-dojo=network-lab` を確かめた場合だけ再利用する。
@@ -62,7 +73,9 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
   - `DELETE /api/network/lab/cleanup`（ラベル `cloud-dojo=network-lab` の一括削除。対象に1つでもあれば何も削除せずに拒否する）
   - compose（`POST /api/compose/up` の同名コンテナ削除、`/api/compose/down`・`down-volumes` のコンテナ・ネットワーク削除。
     どちらもキューのジョブが失敗として終わる。up は、保護したサービスを作り直さず、他のサービスの起動は従来どおり続けたうえで
-    ジョブを失敗にする）。up の接続先ネットワーク `<project>_<network>` が既にあれば、名前の完全一致と、
+    ジョブを失敗にする）。up の存在確認（既存コンテナ・ボリューム・イメージの inspect）は 404 だけを「存在しない」とし、
+    それ以外の失敗（500・通信エラー等）ではそのサービスを作成しない。サービス個別の作成・起動の失敗もジョブの失敗にし、
+    失敗理由に起動したサービスと失敗したサービスを両方とも出す（一部だけ起動した場合も成功にはしない）。up の接続先ネットワーク `<project>_<network>` が既にあれば、名前の完全一致と、
     このプロジェクトの compose ネットワークのラベル（この API が作成時に付ける `cloud-dojo=compose`・
     `cloud-dojo.compose.project`・`cloud-dojo.compose.network`、または Docker Compose が付ける `com.docker.compose.project`・
     `com.docker.compose.network`）を確かめた場合だけ接続する。確かめられなければ（パイロットのラベル、`cloud-dojo=network-lab`
@@ -86,7 +99,14 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
     任意のイメージ・command・名前付きボリューム・上記以外のホストパス・ポート・環境変数は従来どおり使える。
     YAML として解析できない定義も、判定できないため拒否する
   - Kubernetes（`/api/k8s/*`）：namespace・name・kind・tail を Kubernetes の名前の規則（RFC 1123 等）で検証し、
-    妥当でなければ 400 `K8S_INVALID_INPUT` で kubectl を起動しない。kubectl はシェルを介さず（execFile）引数を分けて起動する
+    妥当でなければ 400 `K8S_INVALID_INPUT` で kubectl を起動しない。kubectl はシェルを介さず（execFile）引数を分けて起動する。
+    `POST /api/k8s/apply` のマニフェストは、受付と Worker 側の両方で `services/k8s-manifest-guard.ts` の検査を通し、
+    ノードを操作できる設定があれば 400 `K8S_MANIFEST_REJECTED` で何も適用しない（mock モードでも同じ）。検査は構造上の位置で行い、
+    PodSpec（Pod の `spec`、Deployment・StatefulSet・DaemonSet・ReplicaSet・Job・ReplicationController の `spec.template.spec`、
+    PodTemplate の `template.spec`、CronJob の `spec.jobTemplate.spec.template.spec`、List の `items`、Pod テンプレートを持つ CRD）の
+    コンテナの `securityContext`（`privileged`、許可リスト外の `capabilities.add`）、`hostNetwork`・`hostPID`・`hostIPC`、
+    `volumes[].hostPath.path`（Docker ソケット等）と、PersistentVolume の `spec.hostPath.path` だけを見る。
+    ConfigMap・Secret の `data` 等にある同名のキーは検査しない。真偽値は kubectl と同じく `yes`・`on`・`y` も真とする
   - CI/CD の real 実行（`POST /api/cicd/run` の `executionMode: real`）：許可パターン（`echo …`、`node`・`npm`・`pnpm`・
     `docker`・`git` の `--version`、`ls`、`pwd`、`date`、`whoami`）と引数まで完全に一致する行だけを、シェルを介さずに
     （execFile）実行する。シェルのメタ文字（`; & | $ ( ) < >`、バッククォート、改行、バックスラッシュ）を含む行は実行せずに
@@ -111,7 +131,7 @@ pnpm --filter cloud-dojo-frontend dev:pilot   # 画面：http://127.0.0.1:3000/u
 | `store.ts` | SQLite 保存（attempts / evidence / evaluations / reflections） |
 | `lab/runner.ts` | dockerode ラボランナー（ラベル付きコンテナのみ操作、期限・上限・後始末） |
 | `lab/lock.ts` | ラボ操作の排他区間（プロセス内） |
-| `lab/protect.ts` | 既存のコンテナ操作 API からラボコンテナ（ラベル `cloud-dojo.lab`）を守る判定 |
+| `lab/protect.ts` | 既存のコンテナ操作 API からラボコンテナ（ラベル `cloud-dojo.lab`）と Docker ソケットを保有するコンテナを守る判定 |
 | `routes.ts` | API（`/api/pilot/...`、127.0.0.1 のみ） |
 
 ## テスト

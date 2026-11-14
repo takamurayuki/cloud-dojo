@@ -114,16 +114,34 @@ export function defaultSocketCheckEnv(extraSockets: string[] = []): SocketCheckE
 const WELL_KNOWN_SOCKETS = ['/var/run/docker.sock', '/run/docker.sock'];
 
 /**
- * ~ の展開・相対パスの解決・..／.／重複／末尾スラッシュの正規化。
- * 直し回6（必須1）：`\` は区切りとして扱わない（Linux ではファイル名の文字であり、Docker もそのまま渡す）。
- * `\` を含むパスは dockerSocketReason が判定の前に拒否するので、ここに来るパスには含まれない。
+ * 直し回7（必須1）：パスとして解釈を一致させられない文字列なら理由を返す（そうでなければ null）。
+ * 検査に使う文字列は、実際に Docker・kubelet に渡す文字列そのものとし、検査側だけで書き換える（trim・置き換え等）ことはしない。
+ * そのため、検査と実際の利用で解釈が分かれ得るものは、判定不能として拒否する。
+ * - 前後の空白（Unicode の空白を含む）：以前は検査側だけ trim していたため、`/srv/alias `（ソケットへのリンク）を
+ *   `/srv/alias` として調べ、Docker には空白付きのまま渡していた
+ * - `\`：Linux では区切りではなくファイル名の文字（直し回6）
+ * - 制御文字（改行・タブ・NUL 等）：表示・ログと実体が食い違い、途中で切り詰められ得る
+ * - 空文字列
  */
-function normalizeHostPath(raw: string, env: SocketCheckEnv): string {
-  let p = raw.trim();
-  if (p === '~' || p.startsWith('~/')) p = env.homedir + p.slice(1);
-  // 先頭の重複スラッシュ（//var/run/docker.sock：Windows・macOS の Docker でも使われる書き方）は1つにする
-  p = p.replace(/^\/{2,}/, '/');
-  return path.posix.resolve(env.cwd, p);
+export function uninterpretablePathReason(raw: string): string | null {
+  if (raw === '') return '空のパスは指すものを判定できない';
+  if (raw !== raw.trim()) return `${JSON.stringify(raw)} は前後に空白を含むため、指すものを判定できない（検査と実際の利用で解釈が分かれ得る）`;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(raw)) return `${JSON.stringify(raw)} は制御文字を含むため、指すものを判定できない`;
+  if (raw.includes('\\')) return `${raw} は \\ を含むため、指すものを判定できない（Linux では区切りではなくファイル名の文字）`;
+  return null;
+}
+
+/**
+ * 字句上の候補：相対パスの解決・..／.／重複／末尾スラッシュの正規化（カーネルでも同じものを指す範囲の正規化だけ）。
+ * 直し回7（必須1）：trim はしない（uninterpretablePathReason が前後の空白を先に拒否する）。
+ * `~` は Docker・kubelet では展開されないが、compose の CLI 等が展開するため、元の文字列としての解決に加えて展開した形も
+ * 候補にする（候補を増やすだけで、元の文字列の検査を置き換えない）。
+ */
+function lexicalCandidates(raw: string, env: SocketCheckEnv): string[] {
+  const out = [path.posix.resolve(env.cwd, raw)];
+  if (raw === '~' || raw.startsWith('~/')) out.push(path.posix.resolve(env.cwd, env.homedir + raw.slice(1)));
+  return out;
 }
 
 /** /var/run は通常 /run へのシンボリックリンク。ホストで確かめられない場合も同じものとして扱う */
@@ -171,23 +189,25 @@ function sameOrAncestor(a: string, b: string): boolean {
  * ホストパスが Docker ソケット（またはそれを含むディレクトリ）に解決されるなら理由を返す。そうでなければ null。
  */
 export function dockerSocketReason(raw: string, env: SocketCheckEnv = defaultSocketCheckEnv()): string | null {
-  const slashed = raw.trim().replace(/\\/g, '/').toLowerCase();
-  // Windows の Docker Engine の名前付きパイプ（\\.\pipe\docker_engine 等）
+  // Windows の Docker Engine の名前付きパイプ（\\.\pipe\docker_engine 等）。拒否の理由を分かりやすくするためだけの判定で、
+  // 通す方向には働かない（パイプの書き方は `\\` を含むので、下の判定不能でも拒否される）
+  const slashed = raw.replace(/\\/g, '/').toLowerCase();
   if (/^\/\/[.?]\/pipe\/docker/.test(slashed) || slashed.includes('/pipe/docker_engine')) {
     return `${raw} は Docker Engine の名前付きパイプ`;
   }
-  // 直し回6（必須1）：`\` を含むパスは判定不能として拒否する。Linux では `\` はファイル名の文字で、Docker は元の文字列のまま
-  // 渡す。以前は `\` を `/` に置き換えてから調べたため、`/srv/innocent\alias`（ソケットへのリンク）を別のパス
-  // `/srv/innocent/alias` として調べ、通してしまっていた。置き換えずに調べる方式は OS ごとの解釈の違いを残すため、
-  // 安全側に倒して拒否する（通常の学習用途の bind に `\` を含むパスは要らない）。以後の判定は、渡す文字列そのものに対して行う
-  if (raw.includes('\\')) return `${raw} は \\ を含むため、指すものを判定できない（Linux では区切りではなくファイル名の文字）`;
-  const lexical = normalizeHostPath(raw, env);
-  const real = realish(lexical, env);
-  const forms = new Set([lexical, real, aliasRun(lexical), aliasRun(real)]);
+  // 直し回6・7（必須1）：解釈を一致させられない文字列（`\`・前後の空白・制御文字等）は判定不能として拒否する。
+  // 以後の判定（正規化・realpath・readlink・dev/inode）は、渡す文字列そのものに対して行う
+  const uninterpretable = uninterpretablePathReason(raw);
+  if (uninterpretable) return uninterpretable;
+  const forms = new Set<string>();
+  for (const lexical of lexicalCandidates(raw, env)) {
+    const real = realish(lexical, env);
+    for (const f of [lexical, real, aliasRun(lexical), aliasRun(real)]) forms.add(f);
+  }
 
   const sockets = new Set<string>();
   for (const s of [...WELL_KNOWN_SOCKETS, ...env.extraSockets]) {
-    const n = normalizeHostPath(s, env);
+    const n = path.posix.resolve(env.cwd, s);
     sockets.add(n);
     sockets.add(aliasRun(n));
     const r = realish(n, env);
@@ -204,8 +224,9 @@ export function dockerSocketReason(raw: string, env: SocketCheckEnv = defaultSoc
   }
 
   // ハードリンク等：同じ実体（デバイス・inode）
-  const st = env.stat(real);
-  if (st) {
+  for (const f of forms) {
+    const st = env.stat(f);
+    if (!st) continue;
     for (const s of sockets) {
       const ss = env.stat(s);
       if (ss && ss.dev === st.dev && ss.ino === st.ino) return `${raw} は Docker ソケット ${s} と同じ実体`;
@@ -214,14 +235,18 @@ export function dockerSocketReason(raw: string, env: SocketCheckEnv = defaultSoc
   return null;
 }
 
-/** compose の短い書式の volumes の元（`src:dst[:mode]`）が bind mount なら元パスを返す（名前付きボリュームは null） */
+/**
+ * compose の短い書式の volumes の元（`src:dst[:mode]`）が bind mount なら元パスを返す（名前付きボリュームは null）。
+ * 直し回7（必須1）：spec を trim しない。元の部分に前後の空白・`\`・制御文字があれば、名前付きボリュームとは扱わず
+ * そのまま返す（呼び出し側の dockerSocketReason が判定不能として拒否する）。
+ */
 function shortSyntaxBindSource(spec: string): string | null {
-  const s = spec.trim();
   // Windows のドライブ指定（C:\x:/y）
-  const drive = s.match(/^([A-Za-z]:[\\/][^:]*):/);
-  const src = drive ? drive[1] : s.split(':')[0];
+  const drive = spec.match(/^([A-Za-z]:[\\/][^:]*):/);
+  const src = drive ? drive[1] : spec.split(':')[0];
   if (!src) return null;
-  if (src.startsWith('/') || src.startsWith('.') || src.startsWith('~') || src.startsWith('\\') || drive) return src;
+  if (uninterpretablePathReason(src)) return src;
+  if (src.startsWith('/') || src.startsWith('.') || src.startsWith('~') || drive) return src;
   // 区切りが無い（`- /data` のような匿名ボリューム）は bind ではない
   return null;
 }
@@ -257,7 +282,12 @@ export function inspectComposeDefinition(composeYaml: string, env: SocketCheckEn
 
   const out: ComposeViolation[] = [];
   const checkPath = (service: string | undefined, field: string, p: unknown) => {
-    if (typeof p !== 'string' || !p.trim()) return;
+    // 直し回7（必須1）：空白だけの文字列も読み飛ばさず、dockerSocketReason（判定不能として拒否）に渡す
+    if (p === undefined || p === null) return;
+    if (typeof p !== 'string') {
+      out.push({ service, field, detail: '文字列でないため判定できない' });
+      return;
+    }
     const reason = dockerSocketReason(p, env);
     if (reason) out.push({ service, field, detail: reason });
   };
@@ -318,12 +348,14 @@ export function inspectBinds(service: string, binds: string[], env: SocketCheckE
   const out: ComposeViolation[] = [];
   for (const b of binds) {
     // 直し回6（必須1）：Docker（Linux）が Binds を解釈するのと同じく、最初の `:` までを元パスとして調べる。
-    // 短い書式の解釈（Windows のドライブ指定を含む）と食い違う場合に備え、両方を調べる
+    // 短い書式の解釈（Windows のドライブ指定を含む）と食い違う場合に備え、両方を調べる。
+    // 直し回7（必須1）：元の部分は書き換えずに渡す。解釈を一致させられない文字（前後の空白・`\`・制御文字）を含めば、
+    // 名前付きボリュームの形でも判定不能として拒否する
     const sources = new Set<string>();
     const src = shortSyntaxBindSource(b);
     if (src) sources.add(src);
     const dockerSrc = b.split(':')[0];
-    if (dockerSrc && (dockerSrc.startsWith('/') || dockerSrc.startsWith('.') || dockerSrc.includes('\\'))) sources.add(dockerSrc);
+    if (dockerSrc && (dockerSrc.startsWith('/') || dockerSrc.startsWith('.') || uninterpretablePathReason(dockerSrc))) sources.add(dockerSrc);
     for (const p of sources) {
       const reason = dockerSocketReason(p, env);
       if (reason) out.push({ service, field: 'volumes', detail: reason });

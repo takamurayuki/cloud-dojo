@@ -164,7 +164,8 @@ export interface ComposeUpJobData {
  * compose-up ジョブの本体（workers.ts の Worker から呼ぶ。キューを使わずに試験できるよう分けてある）。
  * 同名の既存コンテナがパイロットのラボだったために停止・削除を拒否したサービスがあれば、ジョブを失敗させる
  * （以前はサービスごとのエラーとして記録するだけで success:true を返していた）。
- * それ以外のサービスのエラーの扱い（ジョブは成功のまま、session に記録）は従来どおり。
+ * 直し回7（推奨A）：サービス個別の作成・起動の失敗（存在確認の inspect の 404 以外の失敗を含む）もジョブ失敗にする。
+ * 部分成功の場合は、失敗理由に起動したサービスと失敗したサービスを両方とも載せる。
  */
 export async function runComposeUpJob(
   service: Pick<DockerComposeService, 'composeUp'>,
@@ -192,6 +193,16 @@ export async function runComposeUpJob(
         `パイロットのラボ（または Docker ソケットをマウントしたコンテナ）を保護するため、次のサービスの既存コンテナを停止・削除せずに中止しました（${detail}）`,
       );
     }
+    // 直し回7（推奨A）：サービス個別の作成・起動の失敗もジョブ失敗にする（以前は session に記録するだけで success:true を返していた）。
+    // 部分成功の場合は、起動できたサービスと失敗したサービスを両方とも結果に明示する
+    const summary = summarizeServices(session);
+    if (summary.failed.length > 0) {
+      throw new Error(
+        `${summary.succeeded.length > 0 ? '一部の' : 'すべての'}サービスを起動できませんでした（` +
+          `起動したサービス：${summary.succeeded.length > 0 ? summary.succeeded.join(', ') : 'なし'}／` +
+          `失敗したサービス：${summary.failed.map((f) => `${f.name}: ${f.error}`).join('; ')}）`,
+      );
+    }
     await updateProgress(100);
     return {
       success: true,
@@ -202,6 +213,21 @@ export async function runComposeUpJob(
   } catch (error) {
     throw new Error(`Compose up failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** サービスごとの結果を、起動したもの（running）と失敗したもの（それ以外）に分ける（直し回7 推奨A） */
+export function summarizeServices(session: Pick<ComposeSession, 'services'>): { succeeded: string[]; failed: { name: string; error: string }[] } {
+  const succeeded: string[] = [];
+  const failed: { name: string; error: string }[] = [];
+  for (const [name, s] of Object.entries(session.services)) {
+    if (s.status === 'running') succeeded.push(name);
+    else failed.push({ name, error: s.error ?? `状態 ${s.status}` });
+  }
+  return { succeeded, failed };
 }
 
 function describeRollback(r: NonNullable<ComposeSession['networkRollback']>): string {
@@ -545,21 +571,28 @@ export class DockerComposeService extends EventEmitter {
           // Remove any existing container with the same name
           // （パイロットのラボ（ラベル cloud-dojo.lab）、または Docker ソケットをマウントしたコンテナ（直し回6 必須2）なら拒否する。
           // 操作は inspect で確かめた完全な ID に対して行う）
+          // 直し回7（推奨A）：存在確認の inspect は 404 だけを「存在しない」とし、それ以外の失敗（500・通信エラー等）では
+          // 確かめられないため作成に進まない（サービスの失敗として記録し、ジョブを失敗にする）。既存コンテナの停止・削除の
+          // 失敗も握りつぶさない（以前は inspect と同じ catch で「存在しない」扱いにしていた）
+          let containerInfo: Docker.ContainerInspectInfo | null = null;
           try {
-            const containerInfo = await docker.getContainer(`${projectName}_${serviceName}`).inspect();
+            containerInfo = await docker.getContainer(`${projectName}_${serviceName}`).inspect();
+          } catch (error) {
+            if (!isNotFound(error)) {
+              throw new Error(`既存コンテナ ${projectName}_${serviceName} の確認（inspect）に失敗したため、作成しません（${describeError(error)}）`);
+            }
+          }
+          if (containerInfo) {
             assertContainerOperable({
               Id: containerInfo.Id,
               Labels: containerInfo.Config?.Labels,
               Mounts: containerInfo.Mounts as MountLike[] | undefined,
             });
             const existingContainer = docker.getContainer(containerInfo.Id);
-            if (containerInfo.State.Running) {
+            if (containerInfo.State?.Running) {
               await existingContainer.stop();
             }
             await existingContainer.remove();
-          } catch (error) {
-            if (error instanceof PilotLabProtectedError) throw error;
-            // Container doesn't exist, which is fine
           }
 
           // Determine image name
@@ -630,9 +663,11 @@ export class DockerComposeService extends EventEmitter {
             const { binds, namedVolumes } = planVolumes(projectName, service.volumes);
             for (const volumeName of namedVolumes) {
               // Named volume - ensure it exists
+              // 直し回7（推奨A）：404 のときだけ作成する。それ以外の inspect の失敗はサービスの失敗にする
               try {
                 await docker.getVolume(volumeName).inspect();
-              } catch {
+              } catch (error) {
+                if (!isNotFound(error)) throw new Error(`ボリューム ${volumeName} の確認（inspect）に失敗しました（${describeError(error)}）`);
                 await docker.createVolume({ Name: volumeName });
               }
             }
@@ -644,7 +679,9 @@ export class DockerComposeService extends EventEmitter {
           try {
             await docker.getImage(imageName).inspect();
             imageExists = true;
-          } catch {
+          } catch (error) {
+            // 直し回7（推奨A）：404 のときだけ「無い」とする。それ以外の失敗はサービスの失敗にする
+            if (!isNotFound(error)) throw new Error(`イメージ ${imageName} の確認（inspect）に失敗しました（${describeError(error)}）`);
             imageExists = false;
           }
 
@@ -736,7 +773,8 @@ export class DockerComposeService extends EventEmitter {
           .filter(([_, s]) => s.status === 'error')
           .map(([name, s]) => `${name}: ${s.error}`)
           .join('; ');
-        session.error = `Some services failed to start: ${errors}`;
+        const running = Object.entries(session.services).filter(([_, s]) => s.status === 'running').map(([name]) => name);
+        session.error = `Some services failed to start: ${errors}（起動したサービス：${running.length > 0 ? running.join(', ') : 'なし'}）`;
         console.log(`⚠️ Some services failed`);
       } else {
         session.status = 'running'; // Partial success
